@@ -40,6 +40,16 @@ func (v Vec) Cross(o Vec) Vec {
 // Len returns the Euclidean length of v.
 func (v Vec) Len() float64 { return math.Sqrt(v.Dot(v)) }
 
+// Equal reports whether v and o agree componentwise within tol. It is a
+// tolerant comparison for floating-point results, not an exact one: two vectors
+// that should be equal rarely are, bit for bit, once any arithmetic has touched
+// them.
+func (v Vec) Equal(o Vec, tol float64) bool {
+	return math.Abs(v.X-o.X) <= tol &&
+		math.Abs(v.Y-o.Y) <= tol &&
+		math.Abs(v.Z-o.Z) <= tol
+}
+
 // Normalize returns the unit vector along v and true, or the zero vector and
 // false when v is (near-)zero. The boolean is deliberate: unlike a
 // floor-against-zero helper, Normalize never fabricates a non-unit direction

@@ -1,0 +1,372 @@
+package r3_test
+
+import (
+	"math"
+	"math/rand/v2"
+	"testing"
+
+	"github.com/lestrrat-3d/r3"
+	"github.com/lestrrat-3d/units"
+	"github.com/stretchr/testify/require"
+)
+
+// tol is the slack allowed when comparing results of floating-point geometry.
+const tol = 1e-9
+
+var (
+	axisX = r3.NewVec(1, 0, 0)
+	axisY = r3.NewVec(0, 1, 0)
+	axisZ = r3.NewVec(0, 0, 1)
+)
+
+// randVec returns a point in the cube [-10, 10)³.
+func randVec(rng *rand.Rand) r3.Vec {
+	c := func() float64 { return rng.Float64()*20 - 10 }
+	return r3.NewVec(c(), c(), c())
+}
+
+// randTransform returns a valid transform drawn from every constructor in turn,
+// so a property asserted over it is asserted over the whole type.
+func randTransform(t *testing.T, rng *rand.Rand) r3.Transform {
+	t.Helper()
+
+	angle := units.Radians(rng.Float64() * 2 * math.Pi)
+	switch rng.IntN(5) {
+	case 0:
+		return r3.Identity()
+	case 1:
+		return r3.Translation(randVec(rng))
+	case 2:
+		tr, err := r3.Rotation(randVec(rng), angle)
+		require.NoError(t, err)
+		return tr
+	case 3:
+		tr, err := r3.RotationAround(randVec(rng), randVec(rng), angle)
+		require.NoError(t, err)
+		return tr
+	default:
+		f, err := r3.NewFrame(randVec(rng), randVec(rng), randVec(rng))
+		require.NoError(t, err)
+		tr, err := r3.Reflection(f)
+		require.NoError(t, err)
+		return tr
+	}
+}
+
+func TestTransformApply(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a translation moves a point but not a direction", func(t *testing.T) {
+		t.Parallel()
+
+		// The whole reason Apply and ApplyDir are separate methods: a point has
+		// a position and a direction does not.
+		tr := r3.Translation(r3.NewVec(1, 2, 3))
+		d := r3.NewVec(0, 0, 1)
+
+		require.True(t, tr.Apply(r3.NewVec(10, 10, 10)).Equal(r3.NewVec(11, 12, 13), tol))
+		require.True(t, tr.ApplyDir(d).Equal(d, tol), "a direction must not translate")
+	})
+
+	t.Run("round-trip through the inverse", func(t *testing.T) {
+		t.Parallel()
+
+		rng := rand.New(rand.NewPCG(1, 2))
+		for range 200 {
+			tr := randTransform(t, rng)
+			p := randVec(rng)
+			require.True(t, tr.Inverse().Apply(tr.Apply(p)).Equal(p, tol))
+		}
+	})
+}
+
+func TestTransformThen(t *testing.T) {
+	t.Parallel()
+
+	t.Run("composes in application order", func(t *testing.T) {
+		t.Parallel()
+
+		// This is the spec for the ordering choice: a.Then(b) is "a first, then
+		// b", the reverse of the matrix notation B·A.
+		rng := rand.New(rand.NewPCG(3, 4))
+		for range 200 {
+			a, b, p := randTransform(t, rng), randTransform(t, rng), randVec(rng)
+			require.True(t, a.Then(b).Apply(p).Equal(b.Apply(a.Apply(p)), tol))
+		}
+	})
+
+	t.Run("identity is neutral", func(t *testing.T) {
+		t.Parallel()
+
+		rng := rand.New(rand.NewPCG(5, 6))
+		for range 50 {
+			tr := randTransform(t, rng)
+			require.True(t, tr.Then(r3.Identity()).Equal(tr, tol))
+			require.True(t, r3.Identity().Then(tr).Equal(tr, tol))
+		}
+	})
+
+	t.Run("orthonormality survives long chains", func(t *testing.T) {
+		t.Parallel()
+
+		// Floating-point drift is the failure mode here: a transform that has
+		// been composed a hundred times must still be a rigid motion.
+		rng := rand.New(rand.NewPCG(7, 8))
+		acc := r3.Identity()
+		for range 100 {
+			acc = acc.Then(randTransform(t, rng))
+			require.True(t, acc.IsValid())
+		}
+	})
+}
+
+func TestRotation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("90 degrees about Z maps +X to +Y", func(t *testing.T) {
+		t.Parallel()
+
+		tr, err := r3.Rotation(axisZ, units.Degrees(90))
+		require.NoError(t, err)
+		require.True(t, tr.ApplyDir(axisX).Equal(axisY, tol))
+		require.True(t, tr.ApplyDir(axisY).Equal(axisX.Scale(-1), tol))
+		require.True(t, tr.ApplyDir(axisZ).Equal(axisZ, tol), "the axis is fixed")
+	})
+
+	t.Run("degrees and radians agree", func(t *testing.T) {
+		t.Parallel()
+
+		// The unit is carried by the value, not assumed by the callee.
+		deg, err := r3.Rotation(axisZ, units.Degrees(90))
+		require.NoError(t, err)
+		rad, err := r3.Rotation(axisZ, units.Radians(math.Pi/2))
+		require.NoError(t, err)
+		require.True(t, deg.Equal(rad, tol))
+	})
+
+	t.Run("a full turn is the identity", func(t *testing.T) {
+		t.Parallel()
+
+		tr, err := r3.Rotation(r3.NewVec(1, 2, 3), units.Degrees(360))
+		require.NoError(t, err)
+		require.True(t, tr.Equal(r3.Identity(), tol))
+	})
+
+	t.Run("preserves lengths and angles", func(t *testing.T) {
+		t.Parallel()
+
+		rng := rand.New(rand.NewPCG(9, 10))
+		for range 100 {
+			tr, err := r3.Rotation(randVec(rng), units.Radians(rng.Float64()*2*math.Pi))
+			require.NoError(t, err)
+
+			a, b := randVec(rng), randVec(rng)
+			ra, rb := tr.ApplyDir(a), tr.ApplyDir(b)
+			require.InDelta(t, a.Len(), ra.Len(), tol)
+			require.InDelta(t, a.Dot(b), ra.Dot(rb), tol)
+		}
+	})
+
+	t.Run("is proper, not a reflection", func(t *testing.T) {
+		t.Parallel()
+
+		tr, err := r3.Rotation(axisZ, units.Degrees(30))
+		require.NoError(t, err)
+		require.False(t, tr.IsReflection())
+	})
+
+	t.Run("RotationAround fixes its center", func(t *testing.T) {
+		t.Parallel()
+
+		center := r3.NewVec(10, 20, 30)
+		tr, err := r3.RotationAround(center, axisZ, units.Degrees(90))
+		require.NoError(t, err)
+		require.True(t, tr.Apply(center).Equal(center, tol))
+
+		// A point one unit along +X from the center swings to +Y of it.
+		p := center.Add(axisX)
+		require.True(t, tr.Apply(p).Equal(center.Add(axisY), tol))
+	})
+}
+
+func TestReflection(t *testing.T) {
+	t.Parallel()
+
+	// The XY plane through the origin: reflecting across it negates Z.
+	xy, err := r3.NewFrame(r3.Vec{}, axisX, axisY)
+	require.NoError(t, err)
+
+	t.Run("reverses orientation", func(t *testing.T) {
+		t.Parallel()
+
+		tr, err := r3.Reflection(xy)
+		require.NoError(t, err)
+		require.True(t, tr.IsReflection())
+		require.True(t, tr.IsValid(), "a reflection is still an isometry")
+		require.True(t, tr.Apply(r3.NewVec(1, 2, 3)).Equal(r3.NewVec(1, 2, -3), tol))
+	})
+
+	t.Run("is its own inverse", func(t *testing.T) {
+		t.Parallel()
+
+		tr, err := r3.Reflection(xy)
+		require.NoError(t, err)
+		require.True(t, tr.Then(tr).Equal(r3.Identity(), tol))
+	})
+
+	t.Run("fixes points on the mirror plane", func(t *testing.T) {
+		t.Parallel()
+
+		// An off-origin plane, to catch a reflection that forgets the offset.
+		off, err := r3.NewFrame(r3.NewVec(0, 0, 5), axisX, axisY)
+		require.NoError(t, err)
+		tr, err := r3.Reflection(off)
+		require.NoError(t, err)
+
+		onPlane := off.ToWorldUV(3, 4)
+		require.True(t, tr.Apply(onPlane).Equal(onPlane, tol))
+		// And a point 2 above the plane lands 2 below it.
+		require.True(t, tr.Apply(r3.NewVec(0, 0, 7)).Equal(r3.NewVec(0, 0, 3), tol))
+	})
+}
+
+func TestFromFrame(t *testing.T) {
+	t.Parallel()
+
+	t.Run("agrees with Frame.ToWorld", func(t *testing.T) {
+		t.Parallel()
+
+		// The two paths into world space must not drift apart.
+		rng := rand.New(rand.NewPCG(11, 12))
+		for range 100 {
+			f, err := r3.NewFrame(randVec(rng), randVec(rng), randVec(rng))
+			require.NoError(t, err)
+			tr, err := r3.FromFrame(f)
+			require.NoError(t, err)
+
+			local := randVec(rng)
+			require.True(t, tr.Apply(local).Equal(f.ToWorld(local), tol))
+			// And the inverse must agree with ToLocal.
+			world := randVec(rng)
+			require.True(t, tr.Inverse().Apply(world).Equal(f.ToLocal(world), tol))
+		}
+	})
+
+	t.Run("frame-to-frame placement", func(t *testing.T) {
+		t.Parallel()
+
+		// The recipe decad actually wants, asserted so nobody re-derives it
+		// backwards: express the point in a's coordinates, plant it in b's.
+		a, err := r3.NewFrame(r3.NewVec(1, 2, 3), axisX, axisY)
+		require.NoError(t, err)
+		b, err := r3.NewFrame(r3.NewVec(-4, 0, 6), axisY, axisZ)
+		require.NoError(t, err)
+
+		from, err := r3.FromFrame(a)
+		require.NoError(t, err)
+		to, err := r3.FromFrame(b)
+		require.NoError(t, err)
+		place := from.Inverse().Then(to)
+
+		require.True(t, place.Apply(a.Origin()).Equal(b.Origin(), tol))
+		require.True(t, place.ApplyDir(a.U()).Equal(b.U(), tol))
+		require.True(t, place.ApplyDir(a.V()).Equal(b.V(), tol))
+		require.True(t, place.ApplyDir(a.N()).Equal(b.N(), tol))
+	})
+}
+
+func TestBasisRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	// The persistence path: read the numbers out, feed them back in.
+	rng := rand.New(rand.NewPCG(13, 14))
+	for range 100 {
+		tr := randTransform(t, rng)
+		back, err := r3.FromBasis(tr.Basis(), tr.Translation())
+		require.NoError(t, err)
+		require.True(t, back.Equal(tr, tol))
+		require.Equal(t, tr.IsReflection(), back.IsReflection(), "handedness must survive")
+	}
+}
+
+func TestTransformValidity(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the zero value is invalid", func(t *testing.T) {
+		t.Parallel()
+
+		require.False(t, r3.Transform{}.IsValid())
+	})
+
+	t.Run("every constructor produces a valid transform", func(t *testing.T) {
+		t.Parallel()
+
+		rng := rand.New(rand.NewPCG(15, 16))
+		for range 100 {
+			require.True(t, randTransform(t, rng).IsValid())
+		}
+	})
+}
+
+func TestTransformDegenerateInput(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Rotation rejects a zero axis", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := r3.Rotation(r3.Vec{}, units.Degrees(90))
+		require.ErrorIs(t, err, r3.ErrDegenerateAxis)
+
+		_, err = r3.RotationAround(r3.NewVec(1, 1, 1), r3.Vec{}, units.Degrees(90))
+		require.ErrorIs(t, err, r3.ErrDegenerateAxis)
+	})
+
+	t.Run("Rotation rejects a value that is not an angle", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := r3.Rotation(axisZ, units.Millimeters(30))
+		require.ErrorIs(t, err, units.ErrIncompatible, "a length is not an angle")
+
+		_, err = r3.Rotation(axisZ, units.Scalar(1.5))
+		require.ErrorIs(t, err, units.ErrIncompatible, "a bare number is not an angle")
+	})
+
+	t.Run("Rotation rejects the zero units.Value", func(t *testing.T) {
+		t.Parallel()
+
+		// This case is the whole argument for taking a typed angle: with a bare
+		// float64, a forgotten field is a silent 0-radian identity rotation.
+		// Here it is an error.
+		_, err := r3.Rotation(axisZ, units.Value{})
+		require.ErrorIs(t, err, units.ErrIncompatible)
+	})
+
+	t.Run("frame constructors reject an invalid frame", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := r3.Reflection(r3.Frame{})
+		require.ErrorIs(t, err, r3.ErrDegenerateFrame)
+
+		_, err = r3.FromFrame(r3.Frame{})
+		require.ErrorIs(t, err, r3.ErrDegenerateFrame)
+	})
+
+	t.Run("FromBasis rejects a non-orthonormal basis", func(t *testing.T) {
+		t.Parallel()
+
+		// The back door a scale or shear would sneak in through.
+		for name, b := range map[string]r3.Basis{
+			"zero":      {},
+			"scaled":    {EX: axisX.Scale(2), EY: axisY, EZ: axisZ},
+			"sheared":   {EX: axisX, EY: r3.NewVec(1, 1, 0), EZ: axisZ},
+			"collapsed": {EX: axisX, EY: axisX, EZ: axisZ},
+		} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				_, err := r3.FromBasis(b, r3.Vec{})
+				require.ErrorIs(t, err, r3.ErrNotOrthonormal)
+			})
+		}
+	})
+}

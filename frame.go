@@ -70,6 +70,18 @@ func (f Frame) IsValid() bool {
 	return math.Abs(f.u.Dot(f.v)) <= orthoTol
 }
 
+// Equal reports whether f and o agree within tol, comparing the origin and both
+// in-plane axes. The normal is derived from the axes, so it needs no separate
+// check.
+//
+// tol is a comparison tolerance chosen by the caller. It is unrelated to the
+// fixed threshold [Frame.IsValid] uses to police orthonormality.
+func (f Frame) Equal(o Frame, tol float64) bool {
+	return f.origin.Equal(o.origin, tol) &&
+		f.u.Equal(o.u, tol) &&
+		f.v.Equal(o.v, tol)
+}
+
 // ToWorld maps a local coordinate (u along U, v along V, w along N) to world
 // space.
 func (f Frame) ToWorld(local Vec) Vec {

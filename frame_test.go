@@ -40,6 +40,19 @@ func TestZeroFrameInvalid(t *testing.T) {
 	require.False(t, r3.Frame{}.IsValid())
 }
 
+func TestFrameEqual(t *testing.T) {
+	t.Parallel()
+
+	f := mkFrame(t, r3.NewVec(1, 2, 3), r3.NewVec(1, 0, 0), r3.NewVec(0, 1, 0))
+	require.True(t, f.Equal(f, 0))
+
+	// A frame that differs only in origin, and one only in orientation.
+	moved := mkFrame(t, r3.NewVec(1, 2, 4), r3.NewVec(1, 0, 0), r3.NewVec(0, 1, 0))
+	turned := mkFrame(t, r3.NewVec(1, 2, 3), r3.NewVec(0, 1, 0), r3.NewVec(-1, 0, 0))
+	require.False(t, f.Equal(moved, 1e-9))
+	require.False(t, f.Equal(turned, 1e-9))
+}
+
 func TestFrameRoundTrip(t *testing.T) {
 	f := mkFrame(t, r3.NewVec(10, -5, 2), r3.NewVec(1, 1, 0), r3.NewVec(-1, 1, 0))
 	for _, w := range []r3.Vec{

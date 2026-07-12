@@ -9,10 +9,21 @@ import (
 
 func vecEqual(t *testing.T, want, got r3.Vec) {
 	t.Helper()
-	const tol = 1e-12
-	require.InDelta(t, want.X, got.X, tol)
-	require.InDelta(t, want.Y, got.Y, tol)
-	require.InDelta(t, want.Z, got.Z, tol)
+	// These operations are exact; there is no accumulated drift to absorb, so
+	// hold them to a tighter tolerance than composed geometry gets.
+	const exact = 1e-12
+	require.Truef(t, want.Equal(got, exact), "want %+v, got %+v", want, got)
+}
+
+func TestVecEqual(t *testing.T) {
+	t.Parallel()
+
+	v := r3.NewVec(1, 2, 3)
+	require.True(t, v.Equal(v, 0), "a vector equals itself exactly")
+	require.True(t, v.Equal(r3.NewVec(1.0000001, 2, 3), 1e-6), "within tolerance")
+	require.False(t, v.Equal(r3.NewVec(1.0001, 2, 3), 1e-6), "outside tolerance")
+	// The tolerance is applied per component, not to the distance between them.
+	require.False(t, v.Equal(r3.NewVec(1, 2, 3.5), 1e-6), "a single axis is enough to differ")
 }
 
 func TestVecOps(t *testing.T) {
