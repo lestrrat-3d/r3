@@ -117,6 +117,60 @@ func (v Vec) dotUnit(u Vec) float64 {
 	return ((px * 0.25) + (py * 0.25) + (pz * 0.25)) * 4
 }
 
+// crossNoise is the relative width of the band around zero within which the
+// difference of two float64 products cannot be told apart from zero. Each product
+// is already rounded (a relative error of at most the unit roundoff 2⁻⁵³), and so
+// is their difference, so the computed a·b − c·d sits within 2⁻⁵² · (|a·b| + |c·d|)
+// of the truth. A result inside that band is consistent with an exact zero.
+const crossNoise = 0x1p-52
+
+// diffProd returns a·b − c·d, or exactly 0 when the computed difference lies
+// inside the rounding band of the two products (see crossNoise) and so cannot be
+// distinguished from zero.
+//
+// The band is RELATIVE to the two products this particular difference was formed
+// from, never to the vectors as a whole — that distinction is the whole point. It
+// is what lets a·b − c·d be believed when its products are small or zero (the
+// perpendicular of v = (Max, SmallestNonzeroFloat64, 0) is that denormal, and no
+// large product went anywhere near the determinant that carries it) while being
+// disbelieved when two enormous products cancel down to a last-bit residue, which
+// is what collinear axes leave behind. A relative-to-|v| test would have thrown the
+// denormal away with the noise; an absolute floor would have done the same.
+//
+// The band collapses to zero when both products are zero or denormal, which is
+// exactly right: nothing rounded, so nothing is in doubt.
+//
+// Overflow passes straight through. |a·b − c·d| can reach 2·MaxFloat64 and go to
+// ±Inf; the band is summed term by term (each at most crossNoise·MaxFloat64) so it
+// stays finite, ±Inf is never inside it, and the caller sees the overflow it must
+// handle rather than a silent zero. A NaN fails the positively-phrased test and is
+// likewise passed on.
+func diffProd(a, b, c, d float64) float64 {
+	p, q := a*b, c*d
+	r := p - q
+	if !(math.Abs(r) > crossNoise*math.Abs(p)+crossNoise*math.Abs(q)) {
+		return 0
+	}
+	return r
+}
+
+// crossFiltered returns v × o with each component computed through [diffProd], so
+// that a component the arithmetic cannot tell from zero IS zero. The plain
+// [Vec.Cross] leaves a last-bit residue there instead, and a residue is a
+// direction: it is what stops [NewFrame] from mistaking collinear axes — whose
+// cross product is zero — for axes with a real, if tiny, perpendicular between
+// them.
+//
+// Zeroing a component changes it by no more than the error it already carried, so
+// this is not a loss of accuracy: it is a refusal to invent one.
+func (v Vec) crossFiltered(o Vec) Vec {
+	return Vec{
+		diffProd(v.Y, o.Z, v.Z, o.Y),
+		diffProd(v.Z, o.X, v.X, o.Z),
+		diffProd(v.X, o.Y, v.Y, o.X),
+	}
+}
+
 // direction returns the unit vector along v and true, or false when v has no
 // direction at all: v is exactly zero, or some component is NaN or infinite. It
 // is [Vec.Normalize] without the zeroLen floor — the magnitude is stripped by an

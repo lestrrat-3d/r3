@@ -130,6 +130,64 @@ func TestNewFrameDenormalPerpendicular(t *testing.T) {
 	require.True(t, g.Equal(small, 1e-12), "magnitude must not change the frame")
 }
 
+func TestNewFrameUnrepresentableProjection(t *testing.T) {
+	t.Parallel()
+
+	// The case no rescaling of a Gram–Schmidt PROJECTION could ever have saved.
+	// u = (1, 1, 0) and v = (Max, Max, SmallestNonzeroFloat64) are finite and plainly
+	// not collinear — the perpendicular is (0, 0, 1), carried entirely by that
+	// denormal Z. But the projection scalar v·û is √2·MaxFloat64, a number float64
+	// DOES NOT HAVE: it overflows to +Inf, and v − û·(+Inf) is garbage. Scaling v down
+	// to keep the projection finite only flushes the denormal — the whole of the
+	// perpendicular — to zero. The perpendicular is now taken by a double cross
+	// product (Lagrange), which never forms that scalar: the huge components cancel
+	// inside the cross, where they cancel against each other.
+	const max = math.MaxFloat64
+	f, err := r3.NewFrame(r3.Vec{}, r3.NewVec(1, 1, 0), r3.NewVec(max, max, math.SmallestNonzeroFloat64))
+	require.NoError(t, err, "finite, non-collinear axes are not degenerate")
+	require.True(t, f.IsValid())
+	require.True(t, f.U().Equal(r3.NewVec(1, 1, 0).Scale(1/math.Sqrt2), 1e-12))
+	require.True(t, f.V().Equal(r3.NewVec(0, 0, 1), 1e-12), "the perpendicular is the denormal Z component")
+
+	// N is the third axis of that same frame, up to nothing at all: U × V.
+	require.True(t, f.N().Equal(r3.NewVec(1, -1, 0).Scale(1/math.Sqrt2), 1e-12))
+	require.InDelta(t, 0, f.U().Dot(f.V()), 1e-12)
+
+	// Same axes at ordinary magnitudes give the same frame: only the size differed.
+	small := mkFrame(t, r3.Vec{}, r3.NewVec(1, 1, 0), r3.NewVec(1, 1, 1))
+	require.True(t, f.Equal(small, 1e-12), "magnitude and dynamic range must not change the frame")
+}
+
+func TestNewFrameHandedness(t *testing.T) {
+	t.Parallel()
+
+	// The double cross product un × (v × un) is the Gram–Schmidt perpendicular; the
+	// OTHER operand order, un × (un × v), is that vector NEGATED. Get it wrong and V
+	// flips, which flips N = U × V, and the frame is silently left-handed. Nothing
+	// else in the package would notice. So pin the sign at both ends.
+
+	// The datum everyone knows: X, then Y, gives +Z. Not −Z.
+	xy := mkFrame(t, r3.Vec{}, r3.NewVec(1, 0, 0), r3.NewVec(0, 1, 0))
+	require.True(t, xy.N().Equal(r3.NewVec(0, 0, 1), 1e-12), "X × Y is +Z")
+
+	// And V must stay on the side of u that the caller's v was on: orthonormalizing
+	// v may swing it round to perpendicular, but never through u to the far side.
+	for _, tc := range []struct{ u, v r3.Vec }{
+		{r3.NewVec(0, 2, 0), r3.NewVec(3, 3, 0)},
+		{r3.NewVec(1, 1, 1), r3.NewVec(1, 0, 0)},
+		{r3.NewVec(-2, 5, 1), r3.NewVec(0.5, 0.25, -3)},
+		{r3.NewVec(1, 0, 0), r3.NewVec(math.MaxFloat64, 1e-20, 0)},
+	} {
+		f := mkFrame(t, r3.Vec{}, tc.u, tc.v)
+		require.True(t, f.IsValid())
+		// Positive, not merely non-zero: a flipped sign would make this negative.
+		require.Positive(t, f.V().Dot(tc.v), "V must lie on the same side of u as v did")
+		// Right-handed: the frame's own normal agrees with u × v, which is the
+		// handedness the caller asked for.
+		require.Positive(t, f.N().Dot(tc.u.Cross(tc.v)), "N must agree with u × v")
+	}
+}
+
 func TestNewFrameNonFinite(t *testing.T) {
 	// Every comparison against NaN is false, so a guard phrased as a rejection
 	// would admit these; the frame that came back would not be orthonormal.

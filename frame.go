@@ -26,15 +26,15 @@ type Frame struct {
 }
 
 // NewFrame returns an orthonormal right-handed frame at origin whose first axis
-// is along u and whose second axis lies in the u–v plane. The axes are
-// orthonormalized with Gram–Schmidt (u is kept; v is made perpendicular to u;
-// both are normalized). It returns [ErrDegenerateFrame] when u is zero or when v
-// is collinear with u — either because the perpendicular component vanishes
-// outright, or because the subtraction that computes it cancels down to rounding
-// noise, which is collinearity as far as float64 can tell. Collinearity is judged
-// by what comes out: the perpendicular must actually BE perpendicular to u, to the
-// same tolerance [Frame.IsValid] applies, so a frame returned by NewFrame always
-// passes IsValid.
+// is along u and whose second axis lies in the u–v plane. The axes come back
+// orthonormalized (u is kept; v is made perpendicular to u; both are normalized) —
+// Gram–Schmidt in effect, though not by the projection that name suggests; see
+// below. It returns [ErrDegenerateFrame] when u is zero or when v is collinear with
+// u — either because the perpendicular component vanishes outright, or because the
+// arithmetic that computes it cancels down to rounding noise, which is collinearity
+// as far as float64 can tell. The perpendicular that does come out must actually BE
+// perpendicular to u, to the same tolerance [Frame.IsValid] applies, so a frame
+// returned by NewFrame always passes IsValid.
 //
 // It returns [ErrNonFinite] when origin has a NaN or infinite component: the
 // origin is stored as given, not normalized, so nothing downstream would ever
@@ -45,32 +45,61 @@ type Frame struct {
 // collinear AXES.
 //
 // Axis MAGNITUDE is not a reason for refusal, however large, and neither is a
-// wide dynamic range WITHIN an axis — down to the smallest denormal. Three things
-// make that so, and the scalings among them are exact powers of two, so none costs
-// a mantissa bit:
+// wide dynamic range WITHIN an axis — down to the smallest denormal.
 //
-//   - The projection v·un is taken with [Vec.dotUnit], which scales the three
-//     PRODUCTS rather than v, so the perpendicular of u = (1, 0, 0) with
-//     v = (MaxFloat64, 1e-20, 0) — finite, plainly not collinear — is the 1e-20
-//     it actually is, not the zero that scaling v by its own largest component
-//     would have made of it.
-//   - The projection is subtracted off UNSCALED, and only redone with v quartered
-//     when that overflows. The true perpendicular of two finite axes can have
-//     components past MaxFloat64 (u = (MaxFloat64, MaxFloat64, MaxFloat64) with
-//     v = (MaxFloat64, MaxFloat64, −MaxFloat64) is such a pair), and there the
-//     subtraction must be done a quarter of the way down, where it cannot overflow;
-//     the quarter is never undone, since only the DIRECTION of the perpendicular is
-//     wanted and direction is scale-invariant. But quartering UNCONDITIONALLY buys
-//     that headroom at the far end's expense: it underflows the smallest denormals,
-//     and for v = (MaxFloat64, SmallestNonzeroFloat64, 0) against u = (1, 0, 0) the
-//     denormal is the whole of the perpendicular. So the headroom is bought only
-//     when it is needed.
-//   - The perpendicular is normalized scale-free (see [Vec.direction]) rather than
-//     through [Vec.Normalize], whose zeroLen floor is sized for vectors of order one
-//     and would call a legitimate 1e-20 perpendicular "degenerate" for being small.
+// # Why the perpendicular is not a projection
 //
-// Without all three, NewFrame reported "degenerate axes" about axes that were
-// nothing of the kind.
+// The textbook Gram–Schmidt perpendicular, v − un·(v·un), cannot be computed for
+// such axes, and no rescaling saves it: it must first form the scalar v·un, and
+// for u = (1, 1, 0) with v = (MaxFloat64, MaxFloat64, SmallestNonzeroFloat64) that
+// scalar is √2·MaxFloat64 — a number float64 DOES NOT HAVE. The projection
+// overflows to +Inf on the way to a perpendicular, (0, 0, 1), that is perfectly
+// ordinary. Scaling v down first only trades the fault for its mirror image: the
+// quarter that keeps the projection finite flushes that denormal Z — the whole of
+// the perpendicular — to zero. Either way NewFrame reported "degenerate axes"
+// about axes that are finite and plainly not collinear.
+//
+// So the perpendicular is taken by a double cross product instead, via Lagrange's
+// formula a × (b × c) = b·(a·c) − c·(a·b), which for a unit un gives
+//
+//	un × (v × un)  =  v·(un·un) − un·(un·v)  =  v − un·(v·un)
+//
+// — the Gram–Schmidt perpendicular exactly, SIGN INCLUDED (note the operand order:
+// v × un, not un × v; the other order is the same vector negated, and would flip V,
+// hence N = U × V, and silently invert the frame's handedness). It never forms the
+// unrepresentable scalar. The huge components cancel INSIDE the cross product,
+// where they cancel against each other rather than against a sum that has already
+// overflowed: for the pair above, v × un is (−5e−324, 5e−324, 0), and crossing that
+// with un recovers the Z direction the denormal was carrying, undisturbed.
+//
+// Only the DIRECTION of the perpendicular is wanted — it is normalized immediately
+// — so the magnitude never has to be reconstructed, and any scaling applied along
+// the way can simply be left in place.
+//
+// # The two things the cross products need
+//
+//   - Overflow. A cross product component is a difference of two products and can
+//     reach 2·MaxFloat64, so either cross can still overflow on finite input (v ×
+//     un does for u = (Max, Max, Max), v = (Max, Max, −Max)). When one does, it is
+//     redone with the operand quartered — an exact power of two, which cannot cost a
+//     mantissa bit — and that is safe here in a way it is NOT safe for the projection:
+//     an overflowing cross product has magnitude past MaxFloat64, so whatever the
+//     quarter underflows away was, relatively, some 10⁻⁶³⁰ of the result. It could
+//     not have moved the direction. (Quartering the PROJECTION threw away denormals
+//     that were the entire answer, which is a different thing altogether.) A quarter
+//     always suffices: each product is then at most ¼·Max, so the difference stays
+//     under Max.
+//   - Collinearity. The cross product of collinear axes is zero — the right signal,
+//     and the one degeneracy check this needs — but in float64 two enormous products
+//     cancelling leave a last-bit residue behind instead of a clean zero, and a
+//     residue is a direction. [Vec.crossFiltered] zeroes any component that lies
+//     within the rounding band of the two products that formed it, so collinear axes
+//     produce an exactly zero cross product and are refused, while a denormal
+//     perpendicular that no rounding touched survives.
+//
+// The perpendicular is then normalized scale-free (see [Vec.direction]) rather than
+// through [Vec.Normalize], whose zeroLen floor is sized for vectors of order one and
+// would call a legitimate 1e-20 perpendicular "degenerate" for being small.
 func NewFrame(origin, u, v Vec) (Frame, error) {
 	if !origin.isFinite() {
 		return Frame{}, ErrNonFinite
@@ -79,50 +108,40 @@ func NewFrame(origin, u, v Vec) (Frame, error) {
 	if !ok {
 		return Frame{}, ErrDegenerateFrame
 	}
-	// Remove the u-component of v, leaving the in-plane perpendicular. The
-	// projection goes through dotUnit — un is a unit vector — so a v holding an
-	// enormous component alongside a tiny one keeps the tiny one, which is often
-	// the whole of the perpendicular.
-	//
-	// Do it UNSCALED first. The true perpendicular of two finite axes can want a
-	// component past MaxFloat64 (u = (MaxFloat64, MaxFloat64, MaxFloat64) with
-	// v = (MaxFloat64, MaxFloat64, −MaxFloat64) is such a pair), and quartering v
-	// beforehand buys the headroom that keeps the subtraction from overflowing to
-	// ±Inf — an overflow being indistinguishable from a vanishing perpendicular, and
-	// so a false "degenerate". But quartering is not free at the OTHER end of the
-	// range: it flushes the smallest denormals to zero, and with
-	// v = (MaxFloat64, SmallestNonzeroFloat64, 0) against u = X the denormal IS the
-	// perpendicular — quarter it away and NewFrame reports "degenerate axes" about
-	// axes that are finite and plainly not collinear.
-	//
-	// So buy the headroom only when it is actually needed. The unscaled subtraction
-	// keeps every component v had; it is redone quartered only if it came back
-	// non-finite, which is exactly the overflow case (a NaN or infinite v lands here
-	// too, and is rejected below either way). Quartered, |vsᵢ| <= ¼·Max and
-	// |unᵢ·(vs·un)| <= (√3/4)·Max, so their difference stays under Max. The quarter
-	// is exact, bit for bit, and is never undone: only the DIRECTION of the
-	// perpendicular is wanted, and direction is scale-invariant.
-	vp := v.Sub(un.Scale(v.dotUnit(un)))
+	// A non-finite AXIS is ErrDegenerateFrame, not ErrNonFinite — the shipped
+	// contract, and what Normalize above already reports for u. Checked here rather
+	// than left to fall out of the arithmetic, so it cannot depend on which of NaN's
+	// many products happens to arise below.
+	if !v.isFinite() {
+		return Frame{}, ErrDegenerateFrame
+	}
+	// c = v × un, then un × c = un × (v × un) = v − un·(v·un): the Gram–Schmidt
+	// perpendicular, with the sign the operand order of the inner cross fixes. Each
+	// cross is filtered (collinear axes must give an exactly zero cross product, not
+	// a residue) and each is redone with its operand quartered if it overflowed —
+	// which only happens when the true result is past MaxFloat64, where the quarter
+	// can cost nothing that matters to a direction.
+	c := v.crossFiltered(un)
+	if !c.isFinite() {
+		c = v.Scale(0.25).crossFiltered(un)
+	}
+	vp := un.crossFiltered(c)
 	if !vp.isFinite() {
-		vs := v.Scale(0.25)
-		vp = vs.Sub(un.Scale(vs.dotUnit(un)))
+		vp = un.crossFiltered(c.Scale(0.25))
 	}
 	// The perpendicular is taken for its DIRECTION, so it is normalized scale-free:
 	// its length is legitimately 1e-20 for v = (MaxFloat64, 1e-20, 0), and
 	// Normalize's zeroLen floor — a divide-by-zero guard sized for vectors of order
-	// one — would call that direction "degenerate" merely for being small. Zero, NaN
-	// and infinite v have no direction at all, and those direction does reject.
+	// one — would call that direction "degenerate" merely for being small. Zero (u
+	// and v collinear, or v itself zero) has no direction at all, and that direction
+	// does reject.
 	vn, ok := vp.direction()
 	if !ok {
 		return Frame{}, ErrDegenerateFrame
 	}
-	// What the floor was buying, bought properly. When v is collinear with u the
-	// subtraction above cancels to rounding noise, and that noise — as the
-	// (MaxFloat64, MaxFloat64, MaxFloat64) / half-of-it pair shows — is a multiple
-	// of u, not a perpendicular to it. So ASK whether the perpendicular is
-	// perpendicular, at the same tolerance [Frame.IsValid] will hold it to: a frame
-	// NewFrame returns always passes IsValid. Phrased positively, so a NaN that got
-	// this far fails it.
+	// ASK whether the perpendicular is perpendicular, at the same tolerance
+	// [Frame.IsValid] will hold it to: a frame NewFrame returns always passes
+	// IsValid. Phrased positively, so a NaN that got this far fails it.
 	if !(math.Abs(un.Dot(vn)) <= orthoTol) {
 		return Frame{}, ErrDegenerateFrame
 	}
