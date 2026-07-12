@@ -73,14 +73,27 @@
 // vector by its own largest component would flush a small-but-decisive component
 // away, and a mirror plane at (MaxFloat64, 0, 1e-20) would then be reflected
 // across as if it passed through the origin — silently, since nothing about the
-// answer is infinite or NaN. Where a whole vector must be scaled down for headroom
-// — [NewFrame]'s cross products, whose exact result can want a component past
-// MaxFloat64 — it is done only when the unscaled arithmetic actually overflows,
-// because scaling down unconditionally underflows a decisive denormal and calls
-// THAT degenerate. For the same reason NewFrame judges collinearity on the axes AS
-// GIVEN: normalizing an axis first rounds, and the tiny component it rounds away
-// can be the whole evidence that two axes span no plane at all. These paths run
-// once per frame or per feature, so the care costs nothing.
+// answer is infinite or NaN. And where BOTH failure modes threaten at once —
+// [NewFrame]'s deciding cross product, whose determinants can overflow at one end
+// while the whole case turns on a denormal at the other — no vector-level scaling
+// can work at all: a float64 vector spanning more than ~600 decimal orders cannot
+// be brought to any common scale without losing its bottom end. So NewFrame
+// computes each cross determinant a·d − b·c in (mantissa, exponent) form via
+// Frexp: mantissa products live in (0.25, 1) and can neither overflow nor
+// underflow, exponents are exact integers, and collinearity is judged on the axes
+// AS GIVEN — normalizing first would round away the very component that proves
+// two axes span no plane. These paths run once per frame or per feature, so the
+// care costs nothing.
+//
+// That judgement has a floor, and it is documented rather than hidden: an angle
+// below about two ULP (~5e-16 rad) is INDISTINGUISHABLE from collinear input
+// rounded by the caller's own arithmetic — v = 1.1*u, stored, leaves the same
+// one-ulp determinant residue as a deliberately one-ulp-off axis, and no
+// predicate can tell the two apart from the bits. NewFrame rejects both as
+// [ErrDegenerateFrame]: below the floor, the conservative error is preferred over
+// a frame whose normal direction would be the caller's rounding noise. A REAL
+// angle of 1e-13 rad — three orders above the floor, seven below orthoTol — still
+// builds.
 //
 // The PER-POINT mappings are the accepted exception, and there are five of them:
 // [Transform.Apply], [Transform.ApplyDir], [Frame.ToWorld], [Frame.ToWorldUV] and

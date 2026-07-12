@@ -45,6 +45,16 @@ type Frame struct {
 // Axis MAGNITUDE is not a reason for refusal, however large, and neither is a
 // wide dynamic range WITHIN an axis — down to the smallest denormal.
 //
+// The ANGLE between the axes has a floor, though, and it is deliberate: an angle
+// below about two ULP (~5e-16 rad) is treated as collinear. At that separation
+// the bits cannot say whether the caller meant a razor-thin real plane or handed
+// in collinear input rounded by its own arithmetic — v = 1.1*u, stored, leaves
+// exactly the same one-ulp determinant residue as an axis deliberately one ulp
+// off — and a frame built there would carry a normal whose direction is that
+// rounding noise. Below the floor NewFrame prefers the conservative error to the
+// fabricated normal. A real angle of 1e-13 rad, three orders above the floor,
+// builds fine.
+//
 // # Everything is judged on the axes AS GIVEN
 //
 // Collinearity is decided by the normal n = u × v, computed from the ORIGINAL u and

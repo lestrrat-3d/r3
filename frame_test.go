@@ -235,6 +235,33 @@ func TestNewFrameCollinearAtEveryScale(t *testing.T) {
 	}
 }
 
+func TestNewFrameULPFloor(t *testing.T) {
+	t.Parallel()
+
+	// INTENTIONAL, owner-decided behavior — do not "fix" either direction.
+	// Below ~2 ULP of angle, "a real razor-thin plane" and "collinear input
+	// rounded by the caller's own arithmetic" are bit-identical: v = 1.1*u stored
+	// leaves the same one-ulp determinant residue as an axis deliberately one ulp
+	// off, and no predicate can tell them apart. NewFrame rejects BOTH rather than
+	// fabricate a normal out of rounding noise. This test pins both sides of the
+	// boundary so neither direction regresses silently.
+	u := r3.NewVec(1, 1, 1)
+
+	// One ULP off: an angle of ~1.3e-16 rad. Indistinguishable from noise — rejected.
+	v := r3.NewVec(math.Nextafter(1, 2), 1, 1)
+	_, err := r3.NewFrame(r3.Vec{}, u, v)
+	require.ErrorIs(t, err, r3.ErrDegenerateFrame, "below the ULP floor is collinear by decree")
+
+	// And the construction-noise twin it cannot be told apart from — also rejected.
+	_, err = r3.NewFrame(r3.Vec{}, u, u.Scale(1.1))
+	require.ErrorIs(t, err, r3.ErrDegenerateFrame)
+
+	// Three orders above the floor: a REAL angle of 1e-13 rad builds.
+	above, err := r3.NewFrame(r3.Vec{}, r3.NewVec(1, 0, 0), r3.NewVec(1, 1e-13, 0))
+	require.NoError(t, err, "a certifiable angle must build")
+	require.True(t, above.IsValid())
+}
+
 func TestNewFrameCollinearOverflowingCross(t *testing.T) {
 	t.Parallel()
 
