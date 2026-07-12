@@ -182,6 +182,45 @@ func TestTransformThen(t *testing.T) {
 		require.Equal(t, r3.Transform{}, inv)
 	})
 
+	t.Run("rejects a composition whose linear part drifts out of tolerance", func(t *testing.T) {
+		t.Parallel()
+
+		// Orthonormality is judged with slack, and slack accumulates. A basis whose
+		// EX·EY is 7e-10 is INSIDE the 1e-9 tolerance, so FromBasis admits it and
+		// IsValid says yes. Composing it with itself doubles the error to 1.4e-9,
+		// which is outside. Then used to check only the translation and hand that
+		// back with a nil error: two valid transforms composing into an invalid one.
+		b := r3.Basis{EX: r3.NewVec(1, 0, 0), EY: r3.NewVec(7e-10, 1, 0), EZ: r3.NewVec(0, 0, 1)}
+		a, err := r3.FromBasis(b, r3.Vec{})
+		require.NoError(t, err, "7e-10 is inside the orthonormality tolerance")
+		require.True(t, a.IsValid(), "the transform being composed really is valid")
+		require.InDelta(t, 7e-10, a.Basis().EX.Dot(a.Basis().EY), 1e-20)
+
+		c, err := a.Then(a)
+		require.ErrorIs(t, err, r3.ErrNotOrthonormal, "the doubled drift is outside the tolerance")
+		require.Equal(t, r3.Transform{}, c)
+	})
+
+	t.Run("rejects an invalid receiver or argument", func(t *testing.T) {
+		t.Parallel()
+
+		// The zero value is public and documented invalid, so a fallible method must
+		// not launder it into a nil-error result. No separate receiver check is
+		// needed: validating the RESULT catches it, because a zero basis composes —
+		// and transposes — to a zero basis, which is not orthonormal.
+		inv, err := r3.Transform{}.Inverse()
+		require.ErrorIs(t, err, r3.ErrNotOrthonormal)
+		require.Equal(t, r3.Transform{}, inv)
+
+		after, err := r3.Transform{}.Then(r3.Identity())
+		require.ErrorIs(t, err, r3.ErrNotOrthonormal, "an invalid receiver poisons the composition")
+		require.Equal(t, r3.Transform{}, after)
+
+		before, err := r3.Identity().Then(r3.Transform{})
+		require.ErrorIs(t, err, r3.ErrNotOrthonormal, "an invalid argument poisons it just as much")
+		require.Equal(t, r3.Transform{}, before)
+	})
+
 	t.Run("the ordinary inverse still round-trips", func(t *testing.T) {
 		t.Parallel()
 

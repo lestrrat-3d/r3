@@ -13,9 +13,12 @@ import (
 // inventing one would fabricate a direction that was never given.
 var ErrDegenerateAxis = errors.New("r3: degenerate rotation axis (zero vector)")
 
-// ErrNotOrthonormal is returned by [FromBasis] when the basis vectors are not
-// unit length and mutually orthogonal, so they describe a scale, a shear or a
-// collapse rather than a rigid motion.
+// ErrNotOrthonormal is returned when the linear part of a Transform is not made
+// of unit-length, mutually orthogonal vectors, so it describes a scale, a shear
+// or a collapse rather than a rigid motion. [FromBasis] returns it for a basis
+// handed to it; [Transform.Then] and [Transform.Inverse] return it for the
+// linear part they COMPUTE, which orthonormality tolerance alone does not keep
+// orthonormal (see [Transform.Then]).
 var ErrNotOrthonormal = errors.New("r3: basis is not orthonormal")
 
 // Basis is the linear part of a [Transform]: the images of the world basis
@@ -50,12 +53,14 @@ type Basis struct {
 // [Reflection], [FromFrame] or [FromBasis], and derive others from it with
 // [Transform.Then] and [Transform.Inverse]. Those are the only ways to obtain
 // one, and none of them can produce a non-isometry: every one of them but
-// [Identity] is fallible, and each validates what it PRODUCES — not merely what
-// it consumes — returning [ErrNonFinite] rather than a Transform that is not a
+// [Identity] is fallible, and each validates the whole of what it PRODUCES — the
+// translation AND the linear part, not merely what it consumes — returning
+// [ErrNonFinite] or [ErrNotOrthonormal] rather than a Transform that is not a
 // rigid motion. Composition is included on purpose: two valid transforms can
-// compose to an overflowing translation, and a method that could hand that back
-// would sink the invariant just as surely as a careless constructor. The
-// invariant is enforced, not merely documented.
+// compose to an overflowing translation, or to a linear part whose orthonormality
+// error has grown past the tolerance that admitted them, and a method that could
+// hand either back would sink the invariant just as surely as a careless
+// constructor. The invariant is enforced, not merely documented.
 type Transform struct {
 	ex, ey, ez Vec // images of the basis vectors — the linear part, by columns
 	t          Vec // translation
@@ -249,12 +254,9 @@ func FromFrame(f Frame) (Transform, error) {
 // bad t is reported as the non-finite value it is instead of as a complaint about
 // a basis that was perfectly fine.
 func FromBasis(b Basis, t Vec) (Transform, error) {
-	if !t.isFinite() {
-		return Transform{}, ErrNonFinite
-	}
 	out := Transform{ex: b.EX, ey: b.EY, ez: b.EZ, t: t}
-	if !out.IsValid() {
-		return Transform{}, ErrNotOrthonormal
+	if err := out.validate(); err != nil {
+		return Transform{}, err
 	}
 	return out, nil
 }
@@ -287,14 +289,23 @@ func (t Transform) ApplyDir(d Vec) Vec {
 // matrix notation, where the same composition is written B·A — which is exactly
 // why the method is named Then and not Mul.
 //
-// It returns [ErrNonFinite] when the composed translation overflows, which two
-// individually valid transforms can do: translating by MaxFloat64 along X, then
-// again by MaxFloat64 along X, lands at +Inf. That is why Then is fallible.
 // Composition is where the invariant would otherwise leak — a constructor that
 // validates what it produces buys nothing if a method can then produce an
-// unvalidated Transform out of two valid ones. The linear part cannot overflow
-// (an orthonormal basis mapped by an orthonormal basis stays bounded by 1), so
-// the translation is the whole of the check.
+// unvalidated Transform out of two valid ones. So the RESULT is validated, whole:
+// both its translation and its linear part.
+//
+// It returns [ErrNonFinite] when the composed translation overflows, which two
+// individually valid transforms can do: translating by MaxFloat64 along X, then
+// again by MaxFloat64 along X, lands at +Inf.
+//
+// It returns [ErrNotOrthonormal] when the composed linear part is not orthonormal
+// within tolerance. This is NOT an overflow — the images of unit vectors under an
+// orthonormal basis stay bounded — it is the tolerance itself accumulating.
+// Orthonormality is judged with slack (1e-9), so a basis whose EX·EY is 7e-10 is
+// admitted; composing that transform with itself doubles the error to 1.4e-9,
+// which is outside the tolerance. Two valid transforms, an invalid product: the
+// linear part has to be checked, not reasoned away. The same check rejects a
+// zero-value receiver or argument, whose zero basis composes to a zero basis.
 func (t Transform) Then(next Transform) (Transform, error) {
 	out := Transform{
 		ex: next.ApplyDir(t.ex),
@@ -302,10 +313,28 @@ func (t Transform) Then(next Transform) (Transform, error) {
 		ez: next.ApplyDir(t.ez),
 		t:  next.Apply(t.t),
 	}
-	if !out.t.isFinite() {
-		return Transform{}, ErrNonFinite
+	if err := out.validate(); err != nil {
+		return Transform{}, err
 	}
 	return out, nil
+}
+
+// validate reports why t is not a rigid motion, or nil when it is one. It is the
+// check that every fallible path PRODUCING a Transform runs on its result.
+//
+// The order is deliberate: a non-finite translation is named for what it is,
+// [ErrNonFinite], rather than folded into a complaint about a linear part that
+// may be perfectly orthonormal. Only then is the linear part judged, and a
+// failure there — including a NaN or infinite component, which fails the
+// positively phrased guards in [Transform.IsValid] — is [ErrNotOrthonormal].
+func (t Transform) validate() error {
+	if !t.t.isFinite() {
+		return ErrNonFinite
+	}
+	if !t.IsValid() {
+		return ErrNotOrthonormal
+	}
+	return nil
 }
 
 // Inverse returns the transform that undoes t.
@@ -319,7 +348,13 @@ func (t Transform) Then(next Transform) (Transform, error) {
 // is not the same as safety: the inverse translation is −Lᵀ·t, and each of those
 // three dot products sums three products, so a huge-but-finite translation in a
 // rotated basis can carry a component past MaxFloat64 even though t itself was
-// perfectly valid. The result is validated, like everything else in the package.
+// perfectly valid.
+//
+// It returns [ErrNotOrthonormal] when the transposed linear part is not
+// orthonormal — which is exactly when t's own was not, the zero value Transform{}
+// being the plain case. A fallible method that produces a Transform validates the
+// whole of what it produces, so it cannot launder an invalid receiver into a
+// nil-error result.
 func (t Transform) Inverse() (Transform, error) {
 	// Transpose: the rows of the linear part become its columns.
 	inv := Transform{
@@ -329,8 +364,8 @@ func (t Transform) Inverse() (Transform, error) {
 	}
 	// Undo the translation in the un-rotated frame: −Lᵀ·t.
 	inv.t = inv.ApplyDir(t.t).Scale(-1)
-	if !inv.t.isFinite() {
-		return Transform{}, ErrNonFinite
+	if err := inv.validate(); err != nil {
+		return Transform{}, err
 	}
 	return inv, nil
 }
