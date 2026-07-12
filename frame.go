@@ -126,6 +126,14 @@ func (f Frame) Equal(o Frame, tol float64) bool {
 
 // ToWorld maps a local coordinate (u along U, v along V, w along N) to world
 // space.
+//
+// It shares the package's accepted per-point limit: the terms are summed in a
+// fixed order, so a coordinate near [math.MaxFloat64] can drive an intermediate
+// sum to ±Inf even when the exact result is representable. ToWorld is infallible
+// and so returns that non-finite Vec rather than an error — a wrong answer, not a
+// refusal. It is the same trade [Transform.ApplyDir] documents, for the same
+// reason (this runs once per point), and it cannot arise at any magnitude a real
+// model contains. A caller working out at MaxFloat64 must check the result.
 func (f Frame) ToWorld(local Vec) Vec {
 	return f.origin.
 		Add(f.u.Scale(local.X)).
@@ -135,6 +143,8 @@ func (f Frame) ToWorld(local Vec) Vec {
 
 // ToWorldUV maps an in-plane 2D point (u, v) — the currency of a planar sketch
 // — to world space (w = 0).
+//
+// It carries the same accepted per-point overflow limit as [Frame.ToWorld].
 func (f Frame) ToWorldUV(u, v float64) Vec {
 	return f.origin.Add(f.u.Scale(u)).Add(f.v.Scale(v))
 }
@@ -142,6 +152,9 @@ func (f Frame) ToWorldUV(u, v float64) Vec {
 // ToLocal maps a world point to local coordinates. The third component is the
 // signed distance off the plane (along N). It is the exact inverse of ToWorld
 // (the transpose), valid because the frame is orthonormal.
+//
+// "Exact" is about the algebra, not the arithmetic: it carries the same accepted
+// per-point overflow limit as [Frame.ToWorld], through the dot products.
 func (f Frame) ToLocal(world Vec) Vec {
 	d := world.Sub(f.origin)
 	return Vec{d.Dot(f.u), d.Dot(f.v), d.Dot(f.N())}

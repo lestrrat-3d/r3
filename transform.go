@@ -304,13 +304,15 @@ func (t Transform) Apply(p Vec) Vec {
 // it — [Transform.Then] and [Transform.Inverse] — then return [ErrNonFinite] for
 // a composition whose true value was perfectly representable.
 //
-// This is deliberate, and it is the one place in the package where it is. ApplyDir
-// runs once per transformed point and is the hottest function here; overflow-safe
-// accumulation would tax every point transform forever to serve coordinates that
-// cannot occur. The unit of this library is the millimetre, and 1e308 mm is some
-// 1e289 light-years — there is no model, no scene and no tolerance stack anywhere
-// near it. The cold paths, called once per frame or per feature, do pay that cost:
-// [NewFrame] and [Reflection] scale their arithmetic and accept such input.
+// This is deliberate, and it is shared by every PER-POINT mapping in the package —
+// ApplyDir, [Transform.Apply], [Frame.ToWorld], [Frame.ToWorldUV] and
+// [Frame.ToLocal] all sum in fixed order and all behave this way. They run once per
+// transformed point and are the hottest code here; overflow-safe accumulation would
+// tax every point forever to serve coordinates that cannot occur. The unit of this
+// library is the millimetre, and 1e308 mm is some 1e289 light-years — there is no
+// model, no scene and no tolerance stack anywhere near it. The COLD paths, called
+// once per frame or per feature, do pay that cost: [NewFrame] and [Reflection]
+// scale their arithmetic and accept such input.
 //
 // How that surfaces depends on who calls it, and the difference matters:
 //

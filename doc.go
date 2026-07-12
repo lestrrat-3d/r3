@@ -50,27 +50,35 @@
 // motion, with no asterisk.
 //
 // Bigness alone is not a fault, and the package goes out of its way not to treat
-// it as one: a vector whose length overflows still has a direction, and the cold
+// it as one: a vector whose length overflows still has a direction, and the COLD
 // paths — [NewFrame]'s orthonormalization, [Reflection]'s plane offset — do their
 // arithmetic scaled, so an axis or a mirror plane out at MaxFloat64 is built
-// rather than refused. There is ONE accepted exception, on the hot path.
-// [Transform.ApplyDir] sums its three terms in a fixed order, so an intermediate
-// sum can overflow where the final value would not: transforms of points whose
-// coordinates approach MaxFloat64 may therefore be CONSERVATIVELY REJECTED with
-// [ErrNonFinite] — by [Transform.Then] or [Transform.Inverse] — even though the
-// exact result is representable. ApplyDir runs once per transformed point and
-// making it overflow-safe would tax every point transform forever to serve
+// rather than refused. They are called once per frame or per feature, so the cost
+// is nothing.
+//
+// The PER-POINT mappings are the accepted exception, and there are five of them:
+// [Transform.Apply], [Transform.ApplyDir], [Frame.ToWorld], [Frame.ToWorldUV] and
+// [Frame.ToLocal]. Each sums its terms in a fixed order, so an intermediate sum
+// can reach ±Inf where the exact result is perfectly representable — with a basis
+// row of (⅔, ⅔, −⅓), ⅔·Max + ⅔·Max is +Inf before the −⅓·Max that would have
+// brought it back. These run once per transformed point and are the hottest code
+// here; overflow-safe accumulation would tax every point forever to serve
 // coordinates that cannot exist (this library's unit is the millimetre; 1e308 mm
 // is some 1e289 light-years).
 //
-// Be precise about what that costs, because it is not uniform. A Transform is
-// still never silently wrong — [Transform.Then] and [Transform.Inverse] catch the
-// ±Inf and return [ErrNonFinite], so the isometry invariant stands. But
-// [Transform.Apply] and [Transform.ApplyDir] have no error to return: called
-// directly with coordinates near MaxFloat64 they hand back a Vec with a
-// non-finite component, and THAT is a wrong answer rather than an error. A caller
-// working at those magnitudes must check the returned Vec itself. See
-// [Transform.ApplyDir].
+// Be precise about what that costs, because it is NOT uniform:
+//
+//   - A Transform is never silently wrong. [Transform.Then] and
+//     [Transform.Inverse] are fallible: they catch the ±Inf and return
+//     [ErrNonFinite], conservatively refusing a composition whose true value was
+//     representable. The isometry invariant stands.
+//   - The five mappings above are infallible — they have no error to return — so
+//     called directly with coordinates near MaxFloat64 they hand back a Vec with a
+//     non-finite component. That IS a wrong answer rather than an error, in
+//     [Frame]'s world/local mapping exactly as much as in [Transform]'s. A caller
+//     working at those magnitudes must check the returned Vec itself.
+//
+// See [Transform.ApplyDir].
 //
 // The price is that composing is fallible:
 //

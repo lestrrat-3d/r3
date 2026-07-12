@@ -132,6 +132,30 @@ func TestZeroFrameInvalid(t *testing.T) {
 	require.False(t, r3.Frame{}.IsValid())
 }
 
+func TestFrameMappingOverflowsAtMaxFloat64(t *testing.T) {
+	t.Parallel()
+
+	// The accepted per-point limit, which Frame shares with Transform.ApplyDir —
+	// the docs must not pretend it is unique to Transform. ToWorld and ToLocal sum
+	// their terms in fixed order and are infallible, so a coordinate out at
+	// MaxFloat64 can drive an intermediate sum to ±Inf and be returned as-is: a
+	// wrong answer, not an error. Pinned so the claim and the code cannot drift.
+	const max = math.MaxFloat64
+	f := mkFrame(t, r3.Vec{}, r3.NewVec(2, 2, -1).Scale(1.0/3.0), r3.NewVec(2, -1, 2).Scale(1.0/3.0))
+	require.True(t, f.IsValid())
+
+	w := f.ToWorld(r3.NewVec(max, max, max))
+	require.True(t, math.IsInf(w.X, 1), "the documented overflow, not a silent finite lie")
+
+	l := f.ToLocal(r3.NewVec(max, max, max))
+	require.True(t, math.IsInf(l.X, 1) || math.IsInf(l.Z, -1), "same artefact, through the dot products")
+
+	// And the contrast that makes the limit tolerable: at any magnitude a real
+	// model contains, the mapping is exact and the round-trip holds.
+	p := r3.NewVec(3, -4, 5)
+	require.True(t, f.ToWorld(f.ToLocal(p)).Equal(p, 1e-12))
+}
+
 func TestFrameEqual(t *testing.T) {
 	t.Parallel()
 

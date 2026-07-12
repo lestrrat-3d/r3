@@ -93,20 +93,25 @@ it *is* a shape, it does not.
   `Transform` that exists is a real rigid motion, no asterisk. Composition being
   fallible is the bill for that; an always-nil `err` is a small tax, a silently
   infinite placement is not.
-- **Bigness is not a fault — with one accepted exception.** Huge-but-finite input
-  is *built*, not refused: `NewFrame` orthonormalizes axes out at `MaxFloat64`,
-  and `Reflection` offsets a mirror plane that far out, by scaling their
-  arithmetic. Those are cold paths. `ApplyDir` is not — it runs once per
-  transformed point — so it sums its three terms in fixed order, and an
-  intermediate sum can overflow where the final value would not. **Transforms of
-  points whose coordinates approach `MaxFloat64` may therefore be conservatively
-  rejected** with `ErrNonFinite` by `Then` or `Inverse`, even when the exact
-  result is representable. That is deliberate: the unit here is the millimetre,
-  and `1e308` mm is ~`1e289` light-years. A `Transform` is still never silently
-  wrong — but `Apply`/`ApplyDir` have no error to return, so called *directly* at
-  those magnitudes they hand back a `Vec` with a non-finite component. At
-  `MaxFloat64` you must check the returned `Vec`; everywhere a real model lives,
-  this cannot arise.
+- **Bigness is not a fault — except in the per-point mappings.** Huge-but-finite
+  input is *built*, not refused, on the **cold** paths: `NewFrame` orthonormalizes
+  axes out at `MaxFloat64`, and `Reflection` offsets a mirror plane that far out,
+  by scaling their arithmetic. They run once per frame or per feature, so the cost
+  is nothing. The **per-point** mappings — `Transform.Apply`, `Transform.ApplyDir`,
+  `Frame.ToWorld`, `Frame.ToWorldUV`, `Frame.ToLocal` — do not pay it: each sums
+  its terms in fixed order, so an intermediate sum can reach `±Inf` where the exact
+  result is representable. They run once per transformed point, and overflow-safe
+  accumulation would tax every point forever to serve coordinates that cannot exist
+  (the unit here is the millimetre; `1e308` mm is ~`1e289` light-years). The cost is
+  **not uniform**, so be precise about it:
+  - A `Transform` is never silently wrong. `Then` and `Inverse` are fallible: they
+    catch the `±Inf` and return `ErrNonFinite`, conservatively refusing a
+    composition whose true value was representable.
+  - The five mappings above are **infallible**, so at those magnitudes they hand
+    back a `Vec` with a non-finite component — a wrong answer, not an error, in
+    `Frame`'s world/local mapping exactly as much as in `Transform`'s. At
+    `MaxFloat64` you must check the returned `Vec`. Everywhere a real model lives,
+    this cannot arise.
 - **`Transform.Inverse` is exact** — the transpose of an orthogonal matrix, never
   a solve. Admitting scale would cost this.
 - **A normal transforms like a direction** (`ApplyDir`). No inverse transpose,
