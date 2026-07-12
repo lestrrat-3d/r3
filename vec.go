@@ -157,9 +157,13 @@ func diffProd(a, b, c, d float64) float64 {
 // crossFiltered returns v × o with each component computed through [diffProd], so
 // that a component the arithmetic cannot tell from zero IS zero. The plain
 // [Vec.Cross] leaves a last-bit residue there instead, and a residue is a
-// direction: it is what stops [NewFrame] from mistaking collinear axes — whose
-// cross product is zero — for axes with a real, if tiny, perpendicular between
-// them.
+// direction — [NewFrame] uses this for its in-plane perpendicular so that
+// cancellation noise never masquerades as a component of one.
+//
+// Both operands must be small enough that no product can overflow — [NewFrame]
+// feeds it unit vectors. The COLLINEARITY decision does not come through here at
+// all: that is [Vec.crossExp], whose exponent-tracked arithmetic answers the
+// zero-or-not question without ever nearing the edges of float64's range.
 //
 // Zeroing a component changes it by no more than the error it already carried, so
 // this is not a loss of accuracy: it is a refusal to invent one.
@@ -171,49 +175,137 @@ func (v Vec) crossFiltered(o Vec) Vec {
 	}
 }
 
-// crossFilteredSafe returns [Vec.crossFiltered] of v and o, retaken with shrunken
-// operands if the cross product overflowed. Both v and o MUST be finite; the result
-// then always is, and it is zero exactly when v and o are collinear (or one of them
-// is zero).
-//
-// A cross product component is a difference of two products, a·b − c·d, and NEITHER
-// stage is safe at the top of the range: the products themselves reach MaxFloat64²
-// when BOTH operands are large (u × v for u = (Max, Max, Max), v = (Max, Max, −Max)),
-// and even bounded products can differ by 2·MaxFloat64. So on overflow the cross is
-// retaken with v reduced to its DIRECTION — components then at most 1, so no product
-// can overflow — and o quartered, so no difference can either. That pair is finite
-// unconditionally, and one retry therefore always suffices.
-//
-// Overflow is detected on the UNFILTERED [Vec.Cross], and that is not an
-// optimization but a necessity: [diffProd]'s rounding band is proportional to the
-// two products, so when a product is itself ±Inf the band is +Inf, every difference
-// lies inside it, and the filter reports the overflow as an exact ZERO — which reads
-// as "collinear". The band's whole justification (that the products are finite
-// numbers, each carrying at most a unit-roundoff of error) is gone at that point.
-// Cross computes the same products and has no band, so ±Inf and NaN reach the
-// finiteness test where they can be acted on.
-//
-// Shrinking is safe HERE and would NOT be safe on the path that did not overflow.
-// Reducing v to its direction is an exponent-strip that can flush a component 10³⁰⁰
-// times smaller than v's largest one to zero — precisely the annihilation that must
-// never befall a small-but-decisive component. But it runs only when the true cross
-// product has magnitude past MaxFloat64, where what is flushed is that same 10⁻³⁰⁰
-// of an enormous answer and could not have moved its direction. When the cross does
-// NOT overflow — the path a denormal perpendicular takes, and the only path most
-// callers ever take — nothing is scaled at all, and the denormal that is the entire
-// answer survives.
-func (v Vec) crossFilteredSafe(o Vec) Vec {
-	if v.Cross(o).isFinite() {
-		return v.crossFiltered(o)
+// expComp is one cross-product component held in (mantissa, exponent) form: the
+// value is m·2^e. m == 0 means the component is exactly zero (and e is then
+// meaningless). Nothing in this form can overflow or underflow: m stays within
+// (0.25, 2) in magnitude and e is an ordinary int, so the full determinant
+// arithmetic of a cross product — whose true values span MaxFloat64² down past
+// the denormals — is carried without ever touching the edges of float64's
+// exponent range.
+type expComp struct {
+	m float64
+	e int
+}
+
+// scaledTo returns the component's value as a float64 relative to the exponent
+// eMax, i.e. m·2^(e−eMax). eMax MUST be >= c.e for a nonzero c, so the result
+// never overflows. It CAN underflow to zero when c sits more than ~1100 binades
+// below eMax — harmless when the caller wants only a direction: a component
+// that far below the largest one is relatively smaller than 2⁻¹⁰⁷⁴ and could
+// not have moved the direction, and it CANNOT fake collinearity either, because
+// the zero/nonzero decision was already made per-component at the mantissa
+// level, where nothing underflows.
+func (c expComp) scaledTo(eMax int) float64 {
+	if c.m == 0 {
+		return 0
 	}
-	// Only a finite, non-zero v can make a cross product overflow, so direction
-	// cannot fail here; if it somehow did, the zero vector is the honest answer —
-	// the caller reads it as degenerate rather than as a direction.
-	vd, ok := v.direction()
-	if !ok {
-		return Vec{}
+	return math.Ldexp(c.m, c.e-eMax)
+}
+
+// diffProdExp returns a·b − c·d as an [expComp]: [diffProd] with the exponents
+// tracked separately, so that no product and no difference can overflow or
+// underflow on the way to the answer. It exists for the one question that must
+// not be answered through float64's exponent range — whether a cross product of
+// axes as extreme as (MaxFloat64/2, MaxFloat64/2, 1e-20) is zero. Those
+// components span more than 600 decimal orders, and NO vector-level rescaling
+// can bring them to a common scale without flushing the bottom end: the
+// representable range below 1.0 is only ~308 orders plus the denormals. Scaling
+// a vector by its own largest component — any variant of it — therefore
+// destroys exactly the small component that decides collinearity. Here nothing
+// is ever scaled by a data-dependent amount, so nothing decisive can be lost.
+//
+//	ma·2^ea = a (math.Frexp)     p = ma·md ∈ ±(0.25, 1) — no overflow possible
+//	                             ep = ea + ed — integer arithmetic, exact
+//
+// A zero operand is the special case: Frexp(0) is (0, 0), so a zero product
+// shows up as p == 0 with a meaningless exponent. A zero product contributes
+// exactly 0 at ANY exponent — nothing was rounded, nothing is in doubt — so it
+// is handled explicitly: both products zero is an exact zero, one product zero
+// hands back the other product alone, band-free.
+//
+// When both products are nonzero they are aligned to the larger exponent — an
+// exact power-of-two shift — and differenced there. A gap of more than ~53
+// binades leaves the smaller term far inside the larger one's rounding band,
+// where its loss to the shift is invisible; a gap past ~1100 flushes it to zero
+// outright, which is the same statement. The difference is then subject to the
+// SAME rounding-band test [diffProd] applies (see crossNoise), on the aligned
+// mantissas: a result the arithmetic cannot tell from zero IS zero. When no
+// product over- or underflows, this returns bit-for-bit what diffProd returns,
+// just carried as (m, e).
+func diffProdExp(a, b, c, d float64) expComp {
+	ma, ea := math.Frexp(a)
+	mb, eb := math.Frexp(b)
+	mc, ec := math.Frexp(c)
+	md, ed := math.Frexp(d)
+	p, ep := ma*mb, ea+eb
+	q, eq := mc*md, ec+ed
+	if p == 0 && q == 0 {
+		return expComp{}
 	}
-	return vd.crossFiltered(o.Scale(0.25))
+	if p == 0 {
+		return expComp{m: -q, e: eq}
+	}
+	if q == 0 {
+		return expComp{m: p, e: ep}
+	}
+	e := max(ep, eq)
+	pa := math.Ldexp(p, ep-e)
+	qa := math.Ldexp(q, eq-e)
+	r := pa - qa
+	// The rounding-band test, phrased positively as everywhere in the package: a
+	// NaN cannot arise here (the inputs are finite mantissas), but the convention
+	// is kept so the shape of every guard reads the same.
+	if !(math.Abs(r) > crossNoise*math.Abs(pa)+crossNoise*math.Abs(qa)) {
+		return expComp{}
+	}
+	return expComp{m: r, e: e}
+}
+
+// expCross is a cross product held componentwise in (mantissa, exponent) form —
+// see [expComp]. It is the package's collinearity kernel: exactly zero when and
+// only when the operands were collinear (or one was zero), with no overflow or
+// underflow anywhere between the operands and that verdict.
+type expCross [3]expComp
+
+// crossExp returns v × o as an [expCross], each component through [diffProdExp].
+// Both v and o MUST be finite. The operand order is the same as [Vec.Cross] and
+// just as load-bearing: swapping v and o negates every component.
+func (v Vec) crossExp(o Vec) expCross {
+	return expCross{
+		diffProdExp(v.Y, o.Z, v.Z, o.Y),
+		diffProdExp(v.Z, o.X, v.X, o.Z),
+		diffProdExp(v.X, o.Y, v.Y, o.X),
+	}
+}
+
+// isZero reports whether every component is exactly zero — for a cross product,
+// whether the operands were collinear. The verdict was reached per-component at
+// the mantissa level, so no magnitude of operand can have faked it.
+func (c expCross) isZero() bool {
+	return c[0].m == 0 && c[1].m == 0 && c[2].m == 0
+}
+
+// direction materializes the unit vector along the cross product, or false when
+// the cross product is zero and has no direction. The components are brought to
+// the largest exponent among them (each an exact power-of-two shift, none able
+// to overflow) and normalized from there; a component more than ~1100 binades
+// below the top flushes to zero on the way, which cannot move a direction by
+// even one ulp — see [expComp.scaledTo].
+func (c expCross) direction() (Vec, bool) {
+	if c.isZero() {
+		return Vec{}, false
+	}
+	e := math.MinInt
+	for _, comp := range c {
+		if comp.m != 0 && comp.e > e {
+			e = comp.e
+		}
+	}
+	return Vec{
+		X: c[0].scaledTo(e),
+		Y: c[1].scaledTo(e),
+		Z: c[2].scaledTo(e),
+	}.direction()
 }
 
 // direction returns the unit vector along v and true, or false when v has no

@@ -86,23 +86,26 @@ type Frame struct {
 // — so its magnitude never has to be reconstructed, and any scaling applied along
 // the way can simply be left in place.
 //
-// # The two things the cross products need
+// # The two things the deciding cross product needs
 //
-//   - Overflow. A cross product component is a difference of two products, so
-//     either cross can overflow on finite input (u × v does for u = (Max, Max, Max),
-//     v = (Max, Max, −Max)). [Vec.crossFilteredSafe] redoes it with shrunken
-//     operands when it does, which is safe there in a way it is NOT safe for the
-//     projection: an overflowing cross product has magnitude past MaxFloat64, so
-//     whatever the shrinking underflows away was, relatively, some 10⁻³⁰⁰ of the
-//     result and could not have moved the direction. It never shrinks anything on
-//     the path that does NOT overflow, which is the path a denormal perpendicular
-//     takes.
+//   - Range. A cross product component is a difference of two products whose true
+//     values span MaxFloat64² down past the denormals, and float64 cannot hold
+//     either end (u × v overflows for u = (Max, Max, Max), v = (Max, Max, −Max)).
+//     No vector-level rescaling fixes that: components can span more than 600
+//     decimal orders (u = (Max/2, Max/2, 1e-20)), and the representable range
+//     below 1.0 is only ~308 orders plus the denormals, so scaling such a vector
+//     by ITS OWN largest component — any variant of it — flushes exactly the small
+//     component that decides collinearity, and the "collinear or not" verdict
+//     comes back wrong. So the deciding cross is not computed in float64's range
+//     at all: [Vec.crossExp] carries each component in (mantissa, exponent) form,
+//     where nothing can overflow or underflow between the axes and the verdict.
 //   - Collinearity. The cross product of collinear axes is zero — the right signal,
 //     and the one degeneracy check this needs — but in float64 two enormous products
 //     cancelling leave a last-bit residue behind instead of a clean zero, and a
-//     residue is a direction. [Vec.crossFiltered] zeroes any component that lies
-//     within the rounding band of the two products that formed it, so collinear axes
-//     produce an exactly zero cross product and are refused, while a denormal
+//     residue is a direction. The kernel zeroes any component that lies within the
+//     rounding band of the two products that formed it (the same band
+//     [Vec.crossFiltered] applies, taken on the aligned mantissas), so collinear
+//     axes produce an exactly zero cross product and are refused, while a denormal
 //     perpendicular that no rounding touched survives.
 //
 // Both axes are then normalized scale-free (see [Vec.direction]) rather than through
@@ -118,25 +121,36 @@ func NewFrame(origin, u, v Vec) (Frame, error) {
 	if !u.isFinite() || !v.isFinite() {
 		return Frame{}, ErrDegenerateFrame
 	}
-	// The plane normal, from the axes AS GIVEN — no normalization has touched them,
-	// so nothing has been rounded away yet. Exactly zero (after filtering) is
+	// The plane normal, from the axes AS GIVEN — no normalization or rescaling has
+	// touched them, so nothing has been rounded or flushed away. The exponent-
+	// tracked kernel makes the zero-or-not call per component at the mantissa
+	// level, where neither a MaxFloat64² product nor a 1e-20 straggler 600 decimal
+	// orders below it can be lost to float64's exponent range. Exactly zero is
 	// exactly the degeneracy: u is zero, or v is, or the two are collinear and span
 	// no plane. THIS is the degeneracy test; the orthonormality post-check below
 	// cannot be, because V is perpendicular to U by construction and would pass it
 	// whatever nonsense it was built from.
-	n := u.crossFilteredSafe(v)
-	if n == (Vec{}) {
+	nDir, ok := u.crossExp(v).direction()
+	if !ok {
+		return Frame{}, ErrDegenerateFrame
+	}
+	un, ok := u.direction()
+	if !ok {
 		return Frame{}, ErrDegenerateFrame
 	}
 	// perp = n × u = (u × v) × u = |u|²·(v − û·(v·û)): the Gram–Schmidt
 	// perpendicular scaled by a POSITIVE factor, so it points to v's side of u. The
 	// operand order fixes the sign; u × n is this vector negated, and would invert
-	// the frame's handedness.
-	perp := n.crossFilteredSafe(u)
-	un, ok := u.direction()
-	if !ok {
-		return Frame{}, ErrDegenerateFrame
-	}
+	// the frame's handedness. Only DIRECTIONS matter from here on, so the cross is
+	// taken between the two unit vectors: every product is then at most 1 in
+	// magnitude and the plain filtered cross cannot overflow.
+	//
+	// Reducing u to its direction is safe HERE in a way it was NOT safe one step
+	// up: the degeneracy decision no longer depends on it, and a component of u
+	// sitting more than 2⁻¹⁰⁷⁴ RELATIVE below u's largest one — the only kind
+	// direction() can flush — cannot be represented in a unit vector anyway, so
+	// nothing decisive is lost where it matters.
+	perp := nDir.crossFiltered(un)
 	// perp is taken for its DIRECTION, so it is normalized scale-free: its length is
 	// legitimately 1e-20 for u = X, v = (MaxFloat64, 1e-20, 0), and Normalize's
 	// zeroLen floor — a divide-by-zero guard sized for vectors of order one — would

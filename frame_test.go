@@ -235,6 +235,110 @@ func TestNewFrameCollinearAtEveryScale(t *testing.T) {
 	}
 }
 
+func TestNewFrameCollinearOverflowingCross(t *testing.T) {
+	t.Parallel()
+
+	// The third sibling of one root cause. u = (Max/2, Max/2, 1e-20) and v = 2·u
+	// are LITERALLY collinear — v is u scaled by an exact power of two — so they
+	// span no plane. But the raw cross product overflows (Max/2 · Max is past the
+	// range), and every earlier rescue rescaled a VECTOR to get back under it:
+	// scaling u by its own largest component flushed the 1e-20 — the one component
+	// whose products decide collinearity, sitting ~328 decimal orders below the
+	// top — before the decision was made, and NewFrame fabricated V = +Z, nil
+	// error, IsValid() true out of degenerate input. No common scale can hold
+	// components 600+ decimal orders apart, so the decision is now made in
+	// (mantissa, exponent) form, where nothing overflows and nothing is flushed.
+	const max = math.MaxFloat64
+	u := r3.NewVec(max/2, max/2, 1e-20)
+	_, err := r3.NewFrame(r3.Vec{}, u, u.Scale(2))
+	require.ErrorIs(t, err, r3.ErrDegenerateFrame, "v = 2·u spans no plane, however its cross product overflows")
+
+	// The same shape at other multiples (the non-power-of-two ones round v off the
+	// line by a last bit, which is as collinear as float64 gets and must be folded
+	// back to zero by the rounding band), with the tiny component in each of the
+	// three positions, and with it all the way down at the smallest denormal.
+	for _, tc := range []struct {
+		u  r3.Vec
+		ks []float64
+	}{
+		{r3.NewVec(max/2, max/2, 1e-20), []float64{2, -2, 1.5, 1e-3}},
+		{r3.NewVec(max/2, 1e-20, max/2), []float64{2, -2, 1.5, 1e-3}},
+		{r3.NewVec(1e-20, max/2, max/2), []float64{2, -2, 1.5, 1e-3}},
+		// The smallest denormal takes only the exact power-of-two multiples: any
+		// other multiple rounds SmallestNonzeroFloat64 by a different RELATIVE
+		// amount than it rounds the huge components, so the scaled v lands
+		// genuinely off u's line and the axes as given really do span a plane —
+		// a different case, not this one.
+		{r3.NewVec(max/2, max/2, math.SmallestNonzeroFloat64), []float64{2, -2}},
+		{r3.NewVec(max/2, math.SmallestNonzeroFloat64, max/2), []float64{2, -2}},
+		{r3.NewVec(math.SmallestNonzeroFloat64, max/2, max/2), []float64{2, -2}},
+	} {
+		for _, k := range tc.ks {
+			v := tc.u.Scale(k)
+			_, err := r3.NewFrame(r3.Vec{}, tc.u, v)
+			require.ErrorIs(t, err, r3.ErrDegenerateFrame, "u=%v, v=%v·u", tc.u, k)
+			// Collinearity does not care which operand is which.
+			_, err = r3.NewFrame(r3.Vec{}, v, tc.u)
+			require.ErrorIs(t, err, r3.ErrDegenerateFrame, "u=%v·u, v=%v", k, tc.u)
+		}
+	}
+}
+
+func TestNewFrameOverflowingCrossRealPlane(t *testing.T) {
+	t.Parallel()
+
+	// The cousin that must NOT be refused: flip the sign of the tiny component
+	// and the two axes span a real plane — at an angle of some 1e-328 radians,
+	// but a real one, carried entirely by components the collinear case above
+	// proves are preserved. Refusing this while refusing that would just be the
+	// old annihilation wearing the other sign.
+	const max = math.MaxFloat64
+	u := r3.NewVec(max/2, max/2, 1e-20)
+	v := r3.NewVec(max/2, max/2, -1e-20)
+	f, err := r3.NewFrame(r3.Vec{}, u, v)
+	require.NoError(t, err, "a tiny angle is an angle, at any magnitude")
+	require.True(t, f.IsValid())
+
+	// The true normal: u × v = 2·(Max/2)·1e-20 · (−1, 1, 0), so N must come back
+	// along (−1, 1, 0)/√2 — a sane direction, not an artifact of the overflow.
+	nWant := r3.NewVec(-1, 1, 0).Scale(1 / math.Sqrt2)
+	require.True(t, f.N().Equal(nWant, 1e-12), "N=%v", f.N())
+	// Perpendicular to both axes' directions (the axes themselves are too large
+	// for a meaningful raw dot product).
+	d := r3.NewVec(1, 1, 0).Scale(1 / math.Sqrt2)
+	require.InDelta(t, 0, f.N().Dot(d), 1e-12, "N must be perpendicular to the plane it claims to be normal to")
+	require.True(t, f.U().Equal(d, 1e-12))
+	// V carries the side v's tiny component chose: −Z, and V·v > 0.
+	require.True(t, f.V().Equal(r3.NewVec(0, 0, -1), 1e-12))
+	require.Positive(t, f.V().Dot(v), "V must lie on the same side of u as v did")
+}
+
+func TestNewFrameNormalMatchesPlainCross(t *testing.T) {
+	t.Parallel()
+
+	// The kernel must not diverge from the plain arithmetic where the plain
+	// arithmetic is fine: for ordinary axes — cross product finite and
+	// comfortably clear of its own rounding noise — the frame's N, built through
+	// the exponent-tracked kernel, must be the direction of the plain u × v.
+	rng := rand.New(rand.NewPCG(23, 42))
+	for range 2000 {
+		u, v := randVec(rng), randVec(rng)
+		c := u.Cross(v)
+		// Near-collinear pairs are excluded not as a concession but by the test's
+		// own terms: there the plain cross is mostly rounding residue, and has no
+		// trustworthy direction for the kernel to agree with.
+		if c.Len() < 1e-3 {
+			continue
+		}
+		want, ok := c.Normalize()
+		require.True(t, ok)
+		f, err := r3.NewFrame(r3.Vec{}, u, v)
+		require.NoError(t, err, "u=%v, v=%v", u, v)
+		require.True(t, f.IsValid(), "u=%v, v=%v", u, v)
+		require.True(t, f.N().Equal(want, 1e-9), "u=%v, v=%v: N=%v, plain=%v", u, v, f.N(), want)
+	}
+}
+
 func TestNewFrameHandedness(t *testing.T) {
 	t.Parallel()
 
