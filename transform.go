@@ -312,11 +312,18 @@ func (t Transform) Apply(p Vec) Vec {
 // near it. The cold paths, called once per frame or per feature, do pay that cost:
 // [NewFrame] and [Reflection] scale their arithmetic and accept such input.
 //
-// The failure is conservative, which is what makes it acceptable rather than
-// merely cheap. ApplyDir does not return a wrong direction; the overflow becomes
-// an ±Inf that the [Transform] invariant catches, so the caller gets an error and
-// never a lie. A rejected transform is a nuisance; a silently wrong isometry is a
-// defect.
+// How that surfaces depends on who calls it, and the difference matters:
+//
+//   - Through [Transform.Then] or [Transform.Inverse], the ±Inf is caught by the
+//     [Transform] invariant and comes back as [ErrNonFinite]. The transform is
+//     refused, never silently wrong: a rejected transform is a nuisance, a
+//     silently wrong isometry is a defect.
+//   - Called DIRECTLY, ApplyDir and [Transform.Apply] have no error to return, so
+//     they hand back a Vec with a non-finite component — for the (⅔, ⅔, −⅓) row
+//     above, +Inf where the exact answer was MaxFloat64. This one IS a wrong
+//     answer rather than an error, and it is the honest price of keeping the hot
+//     path branch-free. A caller feeding coordinates near MaxFloat64 into Apply
+//     must check the result itself.
 func (t Transform) ApplyDir(d Vec) Vec {
 	return t.ex.Scale(d.X).
 		Add(t.ey.Scale(d.Y)).

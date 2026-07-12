@@ -102,8 +102,11 @@ it *is* a shape, it does not.
   points whose coordinates approach `MaxFloat64` may therefore be conservatively
   rejected** with `ErrNonFinite` by `Then` or `Inverse`, even when the exact
   result is representable. That is deliberate: the unit here is the millimetre,
-  and `1e308` mm is ~`1e289` light-years. The failure is one-sided — an error,
-  never a wrong answer.
+  and `1e308` mm is ~`1e289` light-years. A `Transform` is still never silently
+  wrong — but `Apply`/`ApplyDir` have no error to return, so called *directly* at
+  those magnitudes they hand back a `Vec` with a non-finite component. At
+  `MaxFloat64` you must check the returned `Vec`; everywhere a real model lives,
+  this cannot arise.
 - **`Transform.Inverse` is exact** — the transpose of an orthogonal matrix, never
   a solve. Admitting scale would cost this.
 - **A normal transforms like a direction** (`ApplyDir`). No inverse transpose,

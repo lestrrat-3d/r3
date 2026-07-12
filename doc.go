@@ -61,8 +61,16 @@
 // exact result is representable. ApplyDir runs once per transformed point and
 // making it overflow-safe would tax every point transform forever to serve
 // coordinates that cannot exist (this library's unit is the millimetre; 1e308 mm
-// is some 1e289 light-years). The failure is one-sided: an error, never a wrong
-// answer, so the isometry invariant stands. See [Transform.ApplyDir].
+// is some 1e289 light-years).
+//
+// Be precise about what that costs, because it is not uniform. A Transform is
+// still never silently wrong — [Transform.Then] and [Transform.Inverse] catch the
+// ±Inf and return [ErrNonFinite], so the isometry invariant stands. But
+// [Transform.Apply] and [Transform.ApplyDir] have no error to return: called
+// directly with coordinates near MaxFloat64 they hand back a Vec with a
+// non-finite component, and THAT is a wrong answer rather than an error. A caller
+// working at those magnitudes must check the returned Vec itself. See
+// [Transform.ApplyDir].
 //
 // The price is that composing is fallible:
 //

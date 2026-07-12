@@ -212,6 +212,35 @@ func TestTransformThen(t *testing.T) {
 		require.Equal(t, r3.Transform{}, inv)
 	})
 
+	t.Run("Apply and ApplyDir return non-finite components at MaxFloat64", func(t *testing.T) {
+		t.Parallel()
+
+		// The other half of the accepted limit, and the uncomfortable half: Apply and
+		// ApplyDir have no error to return, so where Then/Inverse conservatively
+		// REJECT, these two hand back the ±Inf. For the (⅔, ⅔, −⅓) row the exact
+		// answer is exactly Max — finite and representable — and we return +Inf. That
+		// is a wrong answer, not an error, and the docs must not claim otherwise.
+		// Pinned here so the claim and the code cannot drift apart.
+		const max = math.MaxFloat64
+		b := r3.Basis{
+			EX: r3.NewVec(2, 2, -1).Scale(1.0 / 3.0),
+			EY: r3.NewVec(2, -1, 2).Scale(1.0 / 3.0),
+			EZ: r3.NewVec(-1, 2, 2).Scale(1.0 / 3.0),
+		}
+		tr, err := r3.FromBasis(b, r3.Vec{})
+		require.NoError(t, err)
+
+		d := r3.NewVec(max, max, max)
+		require.True(t, math.IsInf(tr.ApplyDir(d).X, 1), "the documented overflow, not a silent finite lie")
+		require.True(t, math.IsInf(tr.Apply(d).X, 1))
+
+		// And the contrast that makes the limit tolerable: ordinary magnitudes are
+		// exact, so nothing a real model contains is affected.
+		ord := r3.NewVec(3, 4, 5)
+		require.True(t, tr.ApplyDir(ord).Equal(
+			b.EX.Scale(3).Add(b.EY.Scale(4)).Add(b.EZ.Scale(5)), 1e-12))
+	})
+
 	t.Run("rejects a composition whose linear part drifts out of tolerance", func(t *testing.T) {
 		t.Parallel()
 
