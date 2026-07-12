@@ -35,7 +35,9 @@ func randTransform(t *testing.T, rng *rand.Rand) r3.Transform {
 	case 0:
 		return r3.Identity()
 	case 1:
-		return r3.Translation(randVec(rng))
+		tr, err := r3.Translation(randVec(rng))
+		require.NoError(t, err)
+		return tr
 	case 2:
 		tr, err := r3.Rotation(randVec(rng), angle)
 		require.NoError(t, err)
@@ -61,7 +63,8 @@ func TestTransformApply(t *testing.T) {
 
 		// The whole reason Apply and ApplyDir are separate methods: a point has
 		// a position and a direction does not.
-		tr := r3.Translation(r3.NewVec(1, 2, 3))
+		tr, err := r3.Translation(r3.NewVec(1, 2, 3))
+		require.NoError(t, err)
 		d := r3.NewVec(0, 0, 1)
 
 		require.True(t, tr.Apply(r3.NewVec(10, 10, 10)).Equal(r3.NewVec(11, 12, 13), tol))
@@ -306,6 +309,27 @@ func TestTransformValidity(t *testing.T) {
 			require.True(t, randTransform(t, rng).IsValid())
 		}
 	})
+
+	t.Run("a non-finite translation makes a transform invalid", func(t *testing.T) {
+		t.Parallel()
+
+		// IsValid used to inspect the linear part alone, so an identity basis
+		// paired with a NaN translation reported itself a rigid motion while
+		// mapping every point to NaN.
+		for name, v := range map[string]r3.Vec{
+			"nan":  r3.NewVec(math.NaN(), 0, 0),
+			"+inf": r3.NewVec(0, math.Inf(1), 0),
+			"-inf": r3.NewVec(0, 0, math.Inf(-1)),
+		} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				require.False(t, r3.TransformWithTranslation(v).IsValid())
+			})
+		}
+
+		require.True(t, r3.TransformWithTranslation(r3.NewVec(1, 2, 3)).IsValid())
+	})
 }
 
 func TestTransformDegenerateInput(t *testing.T) {
@@ -396,6 +420,151 @@ func TestTransformDegenerateInput(t *testing.T) {
 
 		_, err = r3.FromFrame(r3.Frame{})
 		require.ErrorIs(t, err, r3.ErrDegenerateFrame)
+	})
+
+	t.Run("frame constructors reject a non-finite origin", func(t *testing.T) {
+		t.Parallel()
+
+		// NewFrame no longer builds such a frame, so this is the guard behind the
+		// guard: FromFrame copies the origin into the translation verbatim, and
+		// Reflection multiplies it. Both must refuse. The error names the actual
+		// fault — a non-finite position — rather than blaming the axes.
+		for name, origin := range map[string]r3.Vec{
+			"nan":  r3.NewVec(math.NaN(), 0, 0),
+			"+inf": r3.NewVec(0, math.Inf(1), 0),
+		} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				bad := r3.FrameWithOrigin(origin)
+				require.False(t, bad.IsValid(), "a frame anchored nowhere is not a frame")
+
+				tr, err := r3.FromFrame(bad)
+				require.ErrorIs(t, err, r3.ErrNonFinite)
+				require.Equal(t, r3.Transform{}, tr)
+
+				_, err = r3.Reflection(bad)
+				require.ErrorIs(t, err, r3.ErrNonFinite, "a mirror plane anchored nowhere has no reflection")
+			})
+		}
+	})
+
+	t.Run("Rotation rejects a non-finite angle", func(t *testing.T) {
+		t.Parallel()
+
+		// The unit KIND was checked, the MAGNITUDE never was: a NaN or infinite
+		// number of radians is an angle as far as units is concerned, and it went
+		// straight into math.Sincos, which answers NaN. Rotation returned that
+		// NaN basis with a nil error beside it.
+		for name, angle := range map[string]units.Value{
+			"nan":  units.Radians(math.NaN()),
+			"+inf": units.Radians(math.Inf(1)),
+			"-inf": units.Radians(math.Inf(-1)),
+			// Degrees is the same value in another dress — the conversion to
+			// radians cannot rescue it.
+			"nan degrees": units.Degrees(math.NaN()),
+			"inf degrees": units.Degrees(math.Inf(1)),
+		} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				tr, err := r3.Rotation(axisZ, angle)
+				require.ErrorIs(t, err, r3.ErrNonFinite)
+				require.Equal(t, r3.Transform{}, tr)
+
+				_, err = r3.RotationAround(r3.NewVec(1, 2, 3), axisZ, angle)
+				require.ErrorIs(t, err, r3.ErrNonFinite)
+			})
+		}
+	})
+
+	t.Run("RotationAround rejects a non-finite center", func(t *testing.T) {
+		t.Parallel()
+
+		// The axis and the angle are both fine; it is the pivot that is nowhere.
+		_, err := r3.RotationAround(r3.NewVec(math.NaN(), 0, 0), axisZ, units.Degrees(90))
+		require.ErrorIs(t, err, r3.ErrNonFinite)
+
+		_, err = r3.RotationAround(r3.NewVec(0, math.Inf(1), 0), axisZ, units.Degrees(90))
+		require.ErrorIs(t, err, r3.ErrNonFinite)
+	})
+
+	t.Run("Translation rejects a non-finite displacement", func(t *testing.T) {
+		t.Parallel()
+
+		// Translation used to be infallible, and a NaN displacement produced a
+		// Transform whose IsValid said true — the linear part was a pristine
+		// identity — while Apply sent every point to NaN.
+		for name, v := range map[string]r3.Vec{
+			"nan":  r3.NewVec(math.NaN(), 0, 0),
+			"+inf": r3.NewVec(0, math.Inf(1), 0),
+			"-inf": r3.NewVec(0, 0, math.Inf(-1)),
+		} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				tr, err := r3.Translation(v)
+				require.ErrorIs(t, err, r3.ErrNonFinite)
+				require.Equal(t, r3.Transform{}, tr)
+			})
+		}
+	})
+
+	t.Run("Translation accepts an ordinary displacement", func(t *testing.T) {
+		t.Parallel()
+
+		// The fallible signature must not have cost the happy path anything.
+		tr, err := r3.Translation(r3.NewVec(1, 2, 3))
+		require.NoError(t, err)
+		require.True(t, tr.IsValid())
+		require.True(t, tr.Apply(r3.NewVec(10, 20, 30)).Equal(r3.NewVec(11, 22, 33), tol))
+		require.True(t, tr.Translation().Equal(r3.NewVec(1, 2, 3), tol))
+	})
+
+	t.Run("FromBasis rejects a non-finite translation", func(t *testing.T) {
+		t.Parallel()
+
+		// The basis is impeccable; only the position is not a position. This is
+		// the persistence back door: FromBasis validated the linear part alone.
+		good := r3.Basis{EX: axisX, EY: axisY, EZ: axisZ}
+		for name, v := range map[string]r3.Vec{
+			"nan":  r3.NewVec(math.NaN(), 0, 0),
+			"+inf": r3.NewVec(0, math.Inf(1), 0),
+			"-inf": r3.NewVec(0, 0, math.Inf(-1)),
+		} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				tr, err := r3.FromBasis(good, v)
+				require.ErrorIs(t, err, r3.ErrNonFinite)
+				require.Equal(t, r3.Transform{}, tr)
+			})
+		}
+	})
+
+	t.Run("Reflection rejects a translation that overflows", func(t *testing.T) {
+		t.Parallel()
+
+		// Every input is individually valid and finite, yet the offset the
+		// constructor COMPUTES — 2(origin·n)n — overflows: the plane sits 1e308
+		// along its own normal, and 2e308 is past MaxFloat64 (~1.798e308). So the
+		// result is what has to be validated, not just the input.
+		far, err := r3.NewFrame(r3.NewVec(0, 0, 1e308), axisX, axisY)
+		require.NoError(t, err)
+		require.True(t, far.IsValid(), "the frame itself is perfectly finite")
+
+		tr, err := r3.Reflection(far)
+		require.ErrorIs(t, err, r3.ErrNonFinite)
+		require.Equal(t, r3.Transform{}, tr)
+
+		// And the boundary is real, not a blanket ban on big numbers: 1e300 is
+		// just as huge and doubles without overflowing, so it still reflects.
+		near, err := r3.NewFrame(r3.NewVec(0, 0, 1e300), axisX, axisY)
+		require.NoError(t, err)
+		ok, err := r3.Reflection(near)
+		require.NoError(t, err)
+		require.True(t, ok.IsValid())
+		require.True(t, ok.Translation().Equal(r3.NewVec(0, 0, 2e300), 1e288))
 	})
 
 	t.Run("FromBasis rejects a non-orthonormal basis", func(t *testing.T) {

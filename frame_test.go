@@ -56,6 +56,34 @@ func TestNewFrameNonFinite(t *testing.T) {
 	require.ErrorIs(t, err, r3.ErrDegenerateFrame, "an infinite v axis has no direction")
 }
 
+func TestNewFrameNonFiniteOrigin(t *testing.T) {
+	// The axes are validated by Normalize; the origin never was — it is stored
+	// verbatim. NewFrame therefore used to hand back a frame whose IsValid said
+	// true and whose ToWorld mapped every local coordinate to NaN.
+	//
+	// The error is ErrNonFinite and NOT ErrDegenerateFrame: the axes here are
+	// perfectly good. ErrDegenerateFrame means what it says — zero or collinear
+	// AXES — and keeping the two apart is the point.
+	for name, origin := range map[string]r3.Vec{
+		"nan":  r3.NewVec(math.NaN(), 0, 0),
+		"+inf": r3.NewVec(0, math.Inf(1), 0),
+		"-inf": r3.NewVec(0, 0, math.Inf(-1)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f, err := r3.NewFrame(origin, r3.NewVec(1, 0, 0), r3.NewVec(0, 1, 0))
+			require.ErrorIs(t, err, r3.ErrNonFinite)
+			require.Equal(t, r3.Frame{}, f)
+		})
+	}
+
+	// A huge but finite origin is a position like any other, and is accepted.
+	f, err := r3.NewFrame(r3.NewVec(1e300, 0, 0), r3.NewVec(1, 0, 0), r3.NewVec(0, 1, 0))
+	require.NoError(t, err)
+	require.True(t, f.IsValid())
+}
+
 func TestZeroFrameInvalid(t *testing.T) {
 	require.False(t, r3.Frame{}.IsValid())
 }

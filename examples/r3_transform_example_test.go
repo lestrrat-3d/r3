@@ -17,8 +17,16 @@ func Example_r3_transform() {
 		return
 	}
 
+	// Translation is fallible too: a NaN or infinite displacement is no
+	// displacement, and is rejected rather than propagated into the geometry.
+	lift, err := r3.Translation(r3.NewVec(0, 0, 5))
+	if err != nil {
+		fmt.Printf("failed to build translation: %s\n", err)
+		return
+	}
+
 	// Then composes left to right, in the order the motions happen.
-	place := spin.Then(r3.Translation(r3.NewVec(0, 0, 5)))
+	place := spin.Then(lift)
 
 	// A point carries a position, so it swings about the pivot and rises.
 	corner := place.Apply(r3.NewVec(11, 0, 0))

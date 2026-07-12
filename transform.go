@@ -67,10 +67,19 @@ func Identity() Transform {
 
 // Translation returns the transform that displaces every point by v and leaves
 // every direction untouched.
-func Translation(v Vec) Transform {
+//
+// It returns [ErrNonFinite] when v has a NaN or infinite component. A
+// displacement by NaN is not a displacement, and the resulting Transform would
+// send every point to NaN while claiming to be a rigid motion — so the error is
+// the price of the invariant. [Identity] takes no input and therefore cannot
+// fail; it stays infallible.
+func Translation(v Vec) (Transform, error) {
+	if !v.isFinite() {
+		return Transform{}, ErrNonFinite
+	}
 	t := Identity()
 	t.t = v
-	return t
+	return t, nil
 }
 
 // Rotation returns a right-handed rotation of angle about axis, through the
@@ -82,6 +91,12 @@ func Translation(v Vec) Transform {
 // not angle) alike. A forgotten angle is therefore an error rather than a silent
 // identity rotation.
 //
+// It returns [ErrNonFinite] when angle is an angle of NaN or infinite magnitude.
+// The unit KIND being right is not enough: math.Sincos of either returns NaN, so
+// the basis would come out NaN with a nil error beside it. There is no rotation
+// by an infinite amount and none by NaN, so there is nothing to return but an
+// error.
+//
 // To rotate about an axis that does not pass through the origin, use
 // [RotationAround].
 func Rotation(axis Vec, angle units.Value) (Transform, error) {
@@ -92,6 +107,9 @@ func Rotation(axis Vec, angle units.Value) (Transform, error) {
 	rad, err := angle.In(units.Radian)
 	if err != nil {
 		return Transform{}, fmt.Errorf("r3: rotation angle: %w", err)
+	}
+	if !isFinite(rad) {
+		return Transform{}, ErrNonFinite
 	}
 	sin, cos := math.Sincos(rad)
 	return Transform{
@@ -112,14 +130,24 @@ func rodrigues(v, n Vec, sin, cos float64) Vec {
 // RotationAround returns a right-handed rotation of angle about the axis through
 // center along axis. The center is a fixed point of the result.
 //
-// It returns the same errors as [Rotation].
+// It returns the same errors as [Rotation], plus [ErrNonFinite] when center has
+// a NaN or infinite component — a rotation about a pivot that is nowhere is not
+// a rotation.
 func RotationAround(center, axis Vec, angle units.Value) (Transform, error) {
 	rot, err := Rotation(axis, angle)
 	if err != nil {
 		return Transform{}, err
 	}
 	// Move center to the origin, rotate there, move it back.
-	return Translation(center.Scale(-1)).Then(rot).Then(Translation(center)), nil
+	there, err := Translation(center.Scale(-1))
+	if err != nil {
+		return Transform{}, err
+	}
+	back, err := Translation(center)
+	if err != nil {
+		return Transform{}, err
+	}
+	return there.Then(rot).Then(back), nil
 }
 
 // Reflection returns the reflection across the plane of mirror — the plane
@@ -129,18 +157,36 @@ func RotationAround(center, axis Vec, angle units.Value) (Transform, error) {
 // It returns [ErrDegenerateFrame] when mirror is not a valid frame, because a
 // zero frame has no plane to reflect across and would yield a Transform that is
 // not an isometry at all.
+//
+// It returns [ErrNonFinite] when mirror's origin is not finite, and — the case
+// input validation alone would never have caught — when the translation it
+// COMPUTES is not finite even though every input was. The offset is 2(origin·n)n,
+// so a plane a finite but enormous distance along its own normal (past
+// MaxFloat64/2) doubles to +Inf. What is validated here is therefore the RESULT:
+// a Transform that exists is a real rigid motion, with no asterisk.
 func Reflection(mirror Frame) (Transform, error) {
+	// Checked ahead of IsValid — which would also reject it — so that a plane
+	// anchored nowhere is reported as the non-finite position it is, and not as a
+	// complaint about axes that were never at fault. FromFrame orders it the same
+	// way.
+	if !mirror.Origin().isFinite() {
+		return Transform{}, ErrNonFinite
+	}
 	if !mirror.IsValid() {
 		return Transform{}, ErrDegenerateFrame
 	}
 	n := mirror.N()
+	// Offset the plane from the origin: a point at distance d along n lands at
+	// −d, so the whole reflection shifts by 2(origin·n)n.
+	t := n.Scale(2 * mirror.Origin().Dot(n))
+	if !t.isFinite() {
+		return Transform{}, ErrNonFinite
+	}
 	return Transform{
 		ex: householder(Vec{X: 1}, n),
 		ey: householder(Vec{Y: 1}, n),
 		ez: householder(Vec{Z: 1}, n),
-		// Offset the plane from the origin: a point at distance d along n
-		// lands at −d, so the whole reflection shifts by 2(origin·n)n.
-		t: n.Scale(2 * mirror.Origin().Dot(n)),
+		t:  t,
 	}, nil
 }
 
@@ -153,7 +199,10 @@ func householder(v, n Vec) Vec {
 // coordinates: FromFrame(f).Apply(local) is f.ToWorld(local), and its inverse is
 // f.ToLocal. It is proper — a Frame is right-handed, so the determinant is +1.
 //
-// It returns [ErrDegenerateFrame] when f is not valid.
+// It returns [ErrDegenerateFrame] when f's axes are not orthonormal, and
+// [ErrNonFinite] when f's origin is not finite — the origin becomes the
+// transform's translation verbatim, so it is checked first and reported for what
+// it is rather than being folded into a complaint about the axes.
 //
 // To move a body from one frame to another, compose:
 //
@@ -164,6 +213,9 @@ func householder(v, n Vec) Vec {
 // which reads as "express the point in a's local coordinates, then plant those
 // coordinates in b".
 func FromFrame(f Frame) (Transform, error) {
+	if !f.Origin().isFinite() {
+		return Transform{}, ErrNonFinite
+	}
 	if !f.IsValid() {
 		return Transform{}, ErrDegenerateFrame
 	}
@@ -175,9 +227,15 @@ func FromFrame(f Frame) (Transform, error) {
 // the way a stored transform comes back from disk.
 //
 // It returns [ErrNotOrthonormal] unless b's vectors are unit length and mutually
-// orthogonal. That check is what stops FromBasis from being a back door: a scale
-// or a shear cannot enter the type through it.
+// orthogonal, and [ErrNonFinite] when t is not finite. Those checks are what stop
+// FromBasis from being a back door: neither a scale, nor a shear, nor a NaN
+// position can enter the type through it. The translation is checked first, so a
+// bad t is reported as the non-finite value it is instead of as a complaint about
+// a basis that was perfectly fine.
 func FromBasis(b Basis, t Vec) (Transform, error) {
+	if !t.isFinite() {
+		return Transform{}, ErrNonFinite
+	}
 	out := Transform{ex: b.EX, ey: b.EY, ez: b.EZ, t: t}
 	if !out.IsValid() {
 		return Transform{}, ErrNotOrthonormal
@@ -239,14 +297,22 @@ func (t Transform) Inverse() Transform {
 	return inv
 }
 
-// IsValid reports whether the linear part is orthonormal, i.e. whether t is a
-// rigid motion. The zero value Transform{} is not valid. Use it to vet a
-// transform supplied by a caller before building geometry on it.
+// IsValid reports whether the linear part is orthonormal AND the translation is
+// finite, i.e. whether t is a rigid motion. The zero value Transform{} is not
+// valid. Use it to vet a transform supplied by a caller before building geometry
+// on it.
+//
+// The translation counts. An orthonormal basis paired with a NaN translation
+// still sends every point to NaN: it is a rigid motion of nothing. Checking only
+// the linear part would call that valid.
 //
 // A NaN or infinite component makes t invalid. Every check is phrased
 // positively (!(x <= tol) rather than x > tol) so that a comparison against NaN
 // — which is false whichever way it is written — rejects rather than admits.
 func (t Transform) IsValid() bool {
+	if !t.t.isFinite() {
+		return false
+	}
 	for _, v := range []Vec{t.ex, t.ey, t.ez} {
 		if !(math.Abs(v.Len()-1) <= orthoTol) {
 			return false

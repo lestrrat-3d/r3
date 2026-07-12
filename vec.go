@@ -1,11 +1,35 @@
 package r3
 
-import "math"
+import (
+	"errors"
+	"math"
+)
+
+// ErrNonFinite is returned by any constructor handed — or computing — a NaN or
+// infinite number: an angle, a position, an origin, a translation. Such a value
+// is not a point of ℝ³ and not an amount of rotation, so no rigid motion
+// corresponds to it. Every constructor rejects it rather than propagate it,
+// which is what keeps the [Transform] and [Frame] invariants true without an
+// asterisk.
+//
+// It is distinct from [ErrDegenerateAxis], [ErrDegenerateFrame] and
+// [ErrNotOrthonormal]: those name a direction that cannot be recovered from the
+// input, whereas this one names a number that was never real to begin with.
+var ErrNonFinite = errors.New("r3: non-finite value (NaN or Inf)")
 
 // zeroLen is the threshold below which a vector is treated as having no
 // direction. It is a divide-by-zero guard for Normalize, not a geometric
 // tolerance.
 const zeroLen = 1e-12
+
+// isFinite reports whether x is a real number: neither NaN nor infinite.
+//
+// The predicate is phrased positively — |x| <= MaxFloat64, an ACCEPT test —
+// rather than as a rejection such as math.IsNaN(x) || math.IsInf(x, 0). A NaN
+// compares false against every bound whichever way the test is written, so it
+// must be made to fail an accept test; a reject test it would sail straight
+// through. The whole package leans on this convention.
+func isFinite(x float64) bool { return math.Abs(x) <= math.MaxFloat64 }
 
 // Vec is a vector (or point) in 3-space: pure transient coordinate math. It
 // carries no document state.
@@ -46,6 +70,11 @@ func (v Vec) Cross(o Vec) Vec {
 // over the whole finite range. Len is +Inf only if some component is infinite,
 // and NaN only if some component is NaN.
 func (v Vec) Len() float64 { return math.Hypot(math.Hypot(v.X, v.Y), v.Z) }
+
+// isFinite reports whether every component of v is finite, i.e. whether v names
+// an actual point (or direction) of ℝ³. A vector with a NaN or infinite
+// component does not, and no rigid motion can be built from it.
+func (v Vec) isFinite() bool { return isFinite(v.X) && isFinite(v.Y) && isFinite(v.Z) }
 
 // Equal reports whether v and o agree componentwise within tol. It is a
 // tolerant comparison for floating-point results, not an exact one: two vectors

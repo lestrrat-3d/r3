@@ -30,7 +30,18 @@ type Frame struct {
 // orthonormalized with Gram–Schmidt (u is kept; v is made perpendicular to u;
 // both are normalized). It returns [ErrDegenerateFrame] when u is zero or when
 // v is collinear with u (the perpendicular component vanishes).
+//
+// It returns [ErrNonFinite] when origin has a NaN or infinite component: the
+// origin is stored as given, not normalized, so nothing downstream would ever
+// catch it — and a frame with a NaN origin poisons every point that passes
+// through [Frame.ToWorld] or [FromFrame]. That case is [ErrNonFinite] and not
+// [ErrDegenerateFrame] because the axes are fine; it is the position that is
+// not a position. ErrDegenerateFrame stays reserved for what it says: zero or
+// collinear AXES.
 func NewFrame(origin, u, v Vec) (Frame, error) {
+	if !origin.isFinite() {
+		return Frame{}, ErrNonFinite
+	}
 	un, ok := u.Normalize()
 	if !ok {
 		return Frame{}, ErrDegenerateFrame
@@ -57,14 +68,20 @@ func (f Frame) V() Vec { return f.v }
 // stored.
 func (f Frame) N() Vec { return f.u.Cross(f.v) }
 
-// IsValid reports whether the frame's axes are unit length and mutually
-// orthogonal. The zero value Frame{} is not valid. Use it to vet a frame
-// supplied by a caller before building geometry on it.
+// IsValid reports whether the frame's origin is finite and its axes are unit
+// length and mutually orthogonal. The zero value Frame{} is not valid. Use it to
+// vet a frame supplied by a caller before building geometry on it.
 //
-// A NaN or infinite axis component makes f invalid. Every check is phrased
-// positively (!(x <= tol) rather than x > tol) so that a comparison against NaN
-// — which is false whichever way it is written — rejects rather than admits.
+// A NaN or infinite component — in an axis OR in the origin — makes f invalid.
+// The origin counts: a frame anchored nowhere maps every local coordinate to
+// NaN, which is no more a frame than one with a collapsed axis. Every check is
+// phrased positively (!(x <= tol) rather than x > tol) so that a comparison
+// against NaN — which is false whichever way it is written — rejects rather than
+// admits.
 func (f Frame) IsValid() bool {
+	if !f.origin.isFinite() {
+		return false
+	}
 	if !(math.Abs(f.u.Len()-1) <= orthoTol) {
 		return false
 	}

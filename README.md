@@ -31,8 +31,13 @@ if err != nil {
     return err
 }
 
+lift, err := r3.Translation(r3.NewVec(0, 0, 5))
+if err != nil {
+    return err // r3.ErrNonFinite: a NaN or infinite displacement
+}
+
 // Compose left to right, in the order things happen.
-place := spin.Then(r3.Translation(r3.NewVec(0, 0, 5)))
+place := spin.Then(lift)
 
 p := place.Apply(pt)      // a POINT: rotated, then moved
 n := place.ApplyDir(nrm)  // a DIRECTION: rotated only — never translated
@@ -64,10 +69,16 @@ it *is* a shape, it does not.
 - **`ToLocal` is the transpose, not a matrix solve** — exact, because the axes
   are orthonormal.
 - **A `Transform` is always an isometry.** Scale, shear and projection are
-  **unrepresentable**, not merely discouraged: no constructor can build one, and
-  the fallible ones (`Reflection`, `FromFrame`, `FromBasis`) validate their input
-  and return an error rather than admit a non-isometry. That is what buys the
-  next two properties.
+  **unrepresentable**, not merely discouraged: no constructor can build one. Every
+  constructor but `Identity` is fallible (`Translation`, `Rotation`,
+  `RotationAround`, `Reflection`, `FromFrame`, `FromBasis`) and validates what it
+  **produces**, not just what it consumes, rather than admit a non-isometry. That
+  is what buys the next two properties.
+- **Nothing non-finite gets in.** A NaN or infinite angle, position, origin or
+  translation is rejected with `ErrNonFinite` — including a translation that
+  *overflows* to infinity from inputs that were each individually finite (a
+  `Reflection` across a plane far enough out). A `Transform` that exists is a real
+  rigid motion, no asterisk.
 - **`Transform.Inverse` is exact** — the transpose of an orthogonal matrix, never
   a solve. Admitting scale would cost this.
 - **A normal transforms like a direction** (`ApplyDir`). No inverse transpose,

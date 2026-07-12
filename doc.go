@@ -27,10 +27,19 @@
 // A [Transform] is ALWAYS an isometry: distances and angles survive it, and
 // scale, shear and projection are unrepresentable rather than merely
 // discouraged — no constructor can produce one, because the fallible
-// constructors validate their input and return an error. That is what keeps
-// [Transform.Inverse] exact: it is the transpose, never a solve. It is also why
-// a normal transforms exactly like a direction ([Transform.ApplyDir]), with no
-// inverse transpose anywhere in the package.
+// constructors ([Translation], [Rotation], [RotationAround], [Reflection],
+// [FromFrame], [FromBasis]) validate what they produce, not merely what they
+// consume, and return an error otherwise. [Identity] is the only infallible one,
+// because it takes no input. That is what keeps [Transform.Inverse] exact: it is
+// the transpose, never a solve. It is also why a normal transforms exactly like
+// a direction ([Transform.ApplyDir]), with no inverse transpose anywhere in the
+// package.
+//
+// Nothing non-finite may enter either type. A NaN or infinite angle, position,
+// origin or translation is rejected with [ErrNonFinite] — and so is a
+// translation that OVERFLOWS to infinity while every input was individually
+// finite, which [Reflection] can do for a mirror plane far enough from the
+// origin. A Transform that exists is a real rigid motion, with no asterisk.
 //
 // [Vec.Normalize] returns a boolean rather than fabricating a unit vector from
 // a zero vector; it is a divide-by-zero guard, not a geometric tolerance. The
