@@ -36,12 +36,20 @@ if err != nil {
     return err // r3.ErrNonFinite: a NaN or infinite displacement
 }
 
-// Compose left to right, in the order things happen.
-place := spin.Then(lift)
+// Compose left to right, in the order things happen. Fallible, because two
+// valid transforms can compose to a translation that overflows to infinity.
+place, err := spin.Then(lift)
+if err != nil {
+    return err // r3.ErrNonFinite
+}
 
 p := place.Apply(pt)      // a POINT: rotated, then moved
 n := place.ApplyDir(nrm)  // a DIRECTION: rotated only — never translated
-back := place.Inverse()   // exact: the transpose, not a solve
+
+back, err := place.Inverse() // exact: the transpose, not a solve
+if err != nil {
+    return err // r3.ErrNonFinite
+}
 ```
 
 ## Scope
@@ -69,23 +77,30 @@ it *is* a shape, it does not.
 - **`ToLocal` is the transpose, not a matrix solve** — exact, because the axes
   are orthonormal.
 - **A `Transform` is always an isometry.** Scale, shear and projection are
-  **unrepresentable**, not merely discouraged: no constructor can build one. Every
-  constructor but `Identity` is fallible (`Translation`, `Rotation`,
-  `RotationAround`, `Reflection`, `FromFrame`, `FromBasis`) and validates what it
-  **produces**, not just what it consumes, rather than admit a non-isometry. That
-  is what buys the next two properties.
+  **unrepresentable**, not merely discouraged: nothing in the package can build
+  one. Every operation that yields a `Transform` but `Identity` is fallible — the
+  constructors (`Translation`, `Rotation`, `RotationAround`, `Reflection`,
+  `FromFrame`, `FromBasis`) *and* the derivations (`Then`, `Inverse`) — and each
+  validates what it **produces**, not just what it consumes, rather than admit a
+  non-isometry. That is what buys the next two properties.
 - **Nothing non-finite gets in.** A NaN or infinite angle, position, origin or
   translation is rejected with `ErrNonFinite` — including a translation that
-  *overflows* to infinity from inputs that were each individually finite (a
-  `Reflection` across a plane far enough out). A `Transform` that exists is a real
-  rigid motion, no asterisk.
+  *overflows* to infinity from inputs that were each individually finite: a
+  `Reflection` across a plane far enough out, a `RotationAround` a pivot far
+  enough out, or the `Then` of two transforms that are each perfectly valid. A
+  `Transform` that exists is a real rigid motion, no asterisk. Composition being
+  fallible is the bill for that; an always-nil `err` is a small tax, a silently
+  infinite placement is not.
 - **`Transform.Inverse` is exact** — the transpose of an orthogonal matrix, never
   a solve. Admitting scale would cost this.
 - **A normal transforms like a direction** (`ApplyDir`). No inverse transpose,
   anywhere. Under a general affine map normals need one and everybody forgets;
   here it cannot be got wrong.
 - **`Vec.Normalize` returns `(Vec, bool)`** and never fabricates a unit vector
-  from a zero vector. It is a divide-by-zero guard, not a geometric tolerance.
+  from a zero vector. It is a divide-by-zero guard, not a geometric tolerance —
+  and not a size limit: a vector whose *length* overflows, like
+  `(MaxFloat64, MaxFloat64, 0)`, still has a direction, and gets it
+  (`(1/√2, 1/√2, 0)`).
 - **Angles are typed** (`units.Value`), so `Rotation` rejects a length, a bare
   scalar, and the zero value alike — a forgotten angle is an error, not a silent
   0°.

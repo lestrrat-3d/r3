@@ -91,3 +91,38 @@ func TestVecNormalizeHugeFinite(t *testing.T) {
 	vecEqual(t, r3.NewVec(c, c, c), n)
 	require.InDelta(t, 1, n.Len(), 1e-12, "the result is a unit vector")
 }
+
+func TestVecNormalizeOverflowingLength(t *testing.T) {
+	t.Parallel()
+
+	// The last step past TestVecNormalizeHugeFinite: here even math.Hypot cannot
+	// save the LENGTH, because the true length (√2·MaxFloat64) is not a float64.
+	// The DIRECTION is, though — and the direction is all Normalize was asked for.
+	// Rejecting this vector blamed the direction for a defect of the magnitude,
+	// and NewFrame then reported "degenerate (zero or collinear) axes" about axes
+	// that were neither.
+	v := r3.NewVec(math.MaxFloat64, math.MaxFloat64, 0)
+	require.True(t, math.IsInf(v.Len(), 1), "the length genuinely is not representable")
+
+	n, ok := v.Normalize()
+	require.True(t, ok, "a finite vector has a direction even when its length overflows")
+	c := 1 / math.Sqrt(2)
+	vecEqual(t, r3.NewVec(c, c, 0), n)
+	require.InDelta(t, 1, n.Len(), 1e-12, "the result is a unit vector")
+
+	// The recovery is a division by the largest component, so a lopsided vector
+	// comes out right too, not just a diagonal one.
+	n, ok = r3.NewVec(math.MaxFloat64, 0, -math.MaxFloat64/2).Normalize()
+	require.True(t, ok)
+	want, ok := r3.NewVec(1, 0, -0.5).Normalize()
+	require.True(t, ok)
+	vecEqual(t, want, n)
+
+	// And a frame built on such an axis now succeeds: the axes were never at
+	// fault, and ErrDegenerateFrame stays reserved for axes that really are zero
+	// or collinear.
+	f, err := r3.NewFrame(r3.Vec{}, v, r3.NewVec(0, 0, 1))
+	require.NoError(t, err)
+	require.True(t, f.IsValid())
+	vecEqual(t, r3.NewVec(c, c, 0), f.U())
+}

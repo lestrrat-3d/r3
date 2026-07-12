@@ -67,8 +67,14 @@ func (v Vec) Cross(o Vec) Vec {
 // squares: squaring a large-but-finite component overflows to +Inf (e.g. 1e200²)
 // and a small one underflows to 0, so the naive form reports an infinite length
 // for a perfectly representable vector. Hypot scales internally and so is exact
-// over the whole finite range. Len is +Inf only if some component is infinite,
-// and NaN only if some component is NaN.
+// over the whole finite range.
+//
+// Len is NaN only if some component is NaN. It is +Inf if some component is
+// infinite — and also in the one honest overflow: when the true length is itself
+// past [math.MaxFloat64], as for (MaxFloat64, MaxFloat64, 0), whose length is
+// √2·MaxFloat64. No float64 can name that number, so no implementation could do
+// better. The DIRECTION of such a vector is still recoverable, and
+// [Vec.Normalize] recovers it without going through Len.
 func (v Vec) Len() float64 { return math.Hypot(math.Hypot(v.X, v.Y), v.Z) }
 
 // isFinite reports whether every component of v is finite, i.e. whether v names
@@ -91,24 +97,47 @@ func (v Vec) Equal(o Vec, tol float64) bool {
 // floor-against-zero helper, Normalize never fabricates a non-unit direction —
 // callers must handle the false case.
 //
-// A direction is usable only when v's length is a finite number of at least
-// zeroLen. So:
+// A direction is usable exactly when every component of v is finite and v is not
+// (near-)zero. So:
 //
-//   - v is (near-)zero, or any component is NaN: false.
-//   - any component is infinite: false. There is no finite direction to report,
-//     and dividing through by +Inf would silently flatten v to the zero vector.
+//   - any component is NaN or infinite: false. Such a v is not a vector of ℝ³ at
+//     all; there is no direction to report, and dividing through by +Inf would
+//     silently flatten v to the zero vector.
+//   - v is (near-)zero (length below zeroLen): false.
 //   - v is huge but finite, e.g. (1e200, 1e200, 1e200): true, with the correct
-//     unit vector. [Vec.Len] does not overflow, so such a vector normalizes like
-//     any other rather than being rejected.
+//     unit vector.
+//   - v is so huge that its LENGTH overflows, e.g. (MaxFloat64, MaxFloat64, 0):
+//     also true, with the correct unit vector — here (1/√2, 1/√2, 0). The length
+//     is not representable but the direction is, and the direction is all
+//     Normalize was asked for. It is obtained by dividing v through by its
+//     largest absolute component first, which cannot overflow, and normalizing
+//     that. Rejecting this case would blame the direction for a defect of the
+//     magnitude — and callers such as [NewFrame] would then report "degenerate
+//     axes" about axes that were never degenerate.
 //
-// The guard is phrased positively (!(accept) rather than reject): a NaN length
-// compares false whichever way the test is written, so it must fail the accept
-// test rather than pass a reject test. l <= [math.MaxFloat64] is the finiteness
-// half — a length is never negative, so only +Inf (and NaN) can fail it.
+// The guards are phrased positively (!(accept) rather than reject): a NaN
+// compares false whichever way the test is written, so it must fail an accept
+// test rather than pass a reject test.
 func (v Vec) Normalize() (Vec, bool) {
-	l := v.Len()
-	if !(l >= zeroLen && l <= math.MaxFloat64) {
+	// Finiteness is checked on the COMPONENTS, not on the length: a finite v may
+	// still have an unrepresentable length, and that is not a reason to refuse it
+	// a direction.
+	if !v.isFinite() {
 		return Vec{}, false
 	}
-	return v.Scale(1 / l), true
+	l := v.Len()
+	if !(l >= zeroLen) {
+		return Vec{}, false
+	}
+	if l <= math.MaxFloat64 {
+		return v.Scale(1 / l), true
+	}
+	// The length overflowed even though v did not. Divide by the largest absolute
+	// component — an exact-magnitude scaling that maps the largest component to
+	// ±1, so the scaled length lies in [1, √3] and cannot overflow — then
+	// normalize that. The result is the direction of v, which is what was asked
+	// for; only its (unrepresentable) length is lost.
+	m := math.Max(math.Abs(v.X), math.Max(math.Abs(v.Y), math.Abs(v.Z)))
+	s := Vec{X: v.X / m, Y: v.Y / m, Z: v.Z / m}
+	return s.Scale(1 / s.Len()), true
 }

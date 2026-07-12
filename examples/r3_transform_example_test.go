@@ -25,8 +25,15 @@ func Example_r3_transform() {
 		return
 	}
 
-	// Then composes left to right, in the order the motions happen.
-	place := spin.Then(lift)
+	// Then composes left to right, in the order the motions happen. It is
+	// fallible: two valid transforms can compose to a translation that overflows
+	// to infinity, and the package would rather say so than hand back a placement
+	// that is not a rigid motion.
+	place, err := spin.Then(lift)
+	if err != nil {
+		fmt.Printf("failed to compose: %s\n", err)
+		return
+	}
 
 	// A point carries a position, so it swings about the pivot and rises.
 	corner := place.Apply(r3.NewVec(11, 0, 0))
@@ -37,8 +44,14 @@ func Example_r3_transform() {
 	fmt.Printf("corner: (%.1f, %.1f, %.1f)\n", corner.X, corner.Y, corner.Z)
 	fmt.Printf("normal: (%.1f, %.1f, %.1f)\n", normal.X, normal.Y, normal.Z)
 
-	// The inverse is exact — the transpose of an orthogonal matrix, not a solve.
-	back := place.Inverse().Apply(corner)
+	// The inverse is exact — the transpose of an orthogonal matrix, not a solve —
+	// but exact is not the same as always representable, so it too can fail.
+	undo, err := place.Inverse()
+	if err != nil {
+		fmt.Printf("failed to invert: %s\n", err)
+		return
+	}
+	back := undo.Apply(corner)
 	fmt.Printf("back:   (%.1f, %.1f, %.1f)\n", back.X, back.Y, back.Z)
 
 	// Output:

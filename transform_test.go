@@ -78,7 +78,9 @@ func TestTransformApply(t *testing.T) {
 		for range 200 {
 			tr := randTransform(t, rng)
 			p := randVec(rng)
-			require.True(t, tr.Inverse().Apply(tr.Apply(p)).Equal(p, tol))
+			inv, err := tr.Inverse()
+			require.NoError(t, err)
+			require.True(t, inv.Apply(tr.Apply(p)).Equal(p, tol))
 		}
 	})
 }
@@ -94,7 +96,9 @@ func TestTransformThen(t *testing.T) {
 		rng := rand.New(rand.NewPCG(3, 4))
 		for range 200 {
 			a, b, p := randTransform(t, rng), randTransform(t, rng), randVec(rng)
-			require.True(t, a.Then(b).Apply(p).Equal(b.Apply(a.Apply(p)), tol))
+			ab, err := a.Then(b)
+			require.NoError(t, err, "ordinary transforms compose without overflow")
+			require.True(t, ab.Apply(p).Equal(b.Apply(a.Apply(p)), tol))
 		}
 	})
 
@@ -104,8 +108,14 @@ func TestTransformThen(t *testing.T) {
 		rng := rand.New(rand.NewPCG(5, 6))
 		for range 50 {
 			tr := randTransform(t, rng)
-			require.True(t, tr.Then(r3.Identity()).Equal(tr, tol))
-			require.True(t, r3.Identity().Then(tr).Equal(tr, tol))
+
+			after, err := tr.Then(r3.Identity())
+			require.NoError(t, err)
+			require.True(t, after.Equal(tr, tol))
+
+			before, err := r3.Identity().Then(tr)
+			require.NoError(t, err)
+			require.True(t, before.Equal(tr, tol))
 		}
 	})
 
@@ -117,9 +127,76 @@ func TestTransformThen(t *testing.T) {
 		rng := rand.New(rand.NewPCG(7, 8))
 		acc := r3.Identity()
 		for range 100 {
-			acc = acc.Then(randTransform(t, rng))
+			next, err := acc.Then(randTransform(t, rng))
+			require.NoError(t, err)
+			acc = next
 			require.True(t, acc.IsValid())
 		}
+	})
+
+	t.Run("rejects a composition that overflows", func(t *testing.T) {
+		t.Parallel()
+
+		// Both operands are valid — a displacement by MaxFloat64 is finite and a
+		// perfectly good rigid motion — but their composition is not: the
+		// translations add to +Inf. Then used to return that Transform with no way
+		// to complain, which is the one hole a constructor-only invariant cannot
+		// plug: two things that exist, composing into a thing that must not.
+		far, err := r3.Translation(r3.NewVec(math.MaxFloat64, 0, 0))
+		require.NoError(t, err)
+		require.True(t, far.IsValid())
+
+		tr, err := far.Then(far)
+		require.ErrorIs(t, err, r3.ErrNonFinite)
+		require.Equal(t, r3.Transform{}, tr)
+
+		// The boundary is real, not a blanket ban on big numbers: half of
+		// MaxFloat64 doubles without overflowing, so it still composes.
+		half, err := r3.Translation(r3.NewVec(math.MaxFloat64/2, 0, 0))
+		require.NoError(t, err)
+		ok, err := half.Then(half)
+		require.NoError(t, err)
+		require.True(t, ok.IsValid())
+		require.InDelta(t, math.MaxFloat64, ok.Translation().X, 1e292)
+	})
+
+	t.Run("rejects an inverse that overflows", func(t *testing.T) {
+		t.Parallel()
+
+		// The inverse translation is −Lᵀ·t: three dot products, each summing three
+		// products. Under a rotated basis a huge-but-finite translation therefore
+		// overflows a component even though the transform being inverted is itself
+		// impeccable. Exactness of the transpose does not make it representable.
+		spin, err := r3.Rotation(axisZ, units.Degrees(45))
+		require.NoError(t, err)
+		huge, err := r3.Translation(r3.NewVec(math.MaxFloat64, math.MaxFloat64, 0))
+		require.NoError(t, err)
+		tr, err := spin.Then(huge)
+		require.NoError(t, err, "a rotation composed with a translation cannot overflow")
+		require.True(t, tr.IsValid())
+
+		// Inverting it must sum √2/2·Max + √2/2·Max = √2·Max, which is past
+		// MaxFloat64.
+		inv, err := tr.Inverse()
+		require.ErrorIs(t, err, r3.ErrNonFinite)
+		require.Equal(t, r3.Transform{}, inv)
+	})
+
+	t.Run("the ordinary inverse still round-trips", func(t *testing.T) {
+		t.Parallel()
+
+		// The fallible signature must not have cost the happy path anything.
+		tr, err := r3.RotationAround(r3.NewVec(10, 20, 30), axisZ, units.Degrees(90))
+		require.NoError(t, err)
+		inv, err := tr.Inverse()
+		require.NoError(t, err)
+
+		p := r3.NewVec(1, 2, 3)
+		require.True(t, inv.Apply(tr.Apply(p)).Equal(p, tol))
+
+		back, err := tr.Then(inv)
+		require.NoError(t, err)
+		require.True(t, back.Equal(r3.Identity(), tol))
 	})
 }
 
@@ -214,7 +291,9 @@ func TestReflection(t *testing.T) {
 
 		tr, err := r3.Reflection(xy)
 		require.NoError(t, err)
-		require.True(t, tr.Then(tr).Equal(r3.Identity(), tol))
+		twice, err := tr.Then(tr)
+		require.NoError(t, err)
+		require.True(t, twice.Equal(r3.Identity(), tol))
 	})
 
 	t.Run("fixes points on the mirror plane", func(t *testing.T) {
@@ -250,8 +329,10 @@ func TestFromFrame(t *testing.T) {
 			local := randVec(rng)
 			require.True(t, tr.Apply(local).Equal(f.ToWorld(local), tol))
 			// And the inverse must agree with ToLocal.
+			inv, err := tr.Inverse()
+			require.NoError(t, err)
 			world := randVec(rng)
-			require.True(t, tr.Inverse().Apply(world).Equal(f.ToLocal(world), tol))
+			require.True(t, inv.Apply(world).Equal(f.ToLocal(world), tol))
 		}
 	})
 
@@ -269,7 +350,10 @@ func TestFromFrame(t *testing.T) {
 		require.NoError(t, err)
 		to, err := r3.FromFrame(b)
 		require.NoError(t, err)
-		place := from.Inverse().Then(to)
+		out, err := from.Inverse()
+		require.NoError(t, err)
+		place, err := out.Then(to)
+		require.NoError(t, err)
 
 		require.True(t, place.Apply(a.Origin()).Equal(b.Origin(), tol))
 		require.True(t, place.ApplyDir(a.U()).Equal(b.U(), tol))
@@ -487,6 +571,26 @@ func TestTransformDegenerateInput(t *testing.T) {
 
 		_, err = r3.RotationAround(r3.NewVec(0, math.Inf(1), 0), axisZ, units.Degrees(90))
 		require.ErrorIs(t, err, r3.ErrNonFinite)
+	})
+
+	t.Run("RotationAround rejects a translation that overflows", func(t *testing.T) {
+		t.Parallel()
+
+		// Same shape of bug as Reflection's: every input is finite and valid — a
+		// pivot at MaxFloat64, a unit axis, a half turn — but the offset the
+		// constructor COMPUTES, center − R·center, is 2·MaxFloat64 for a half turn
+		// about Z, which is +Inf. RotationAround used to hand that back with a nil
+		// error and an IsValid() of false: a Transform that was not a rigid motion.
+		tr, err := r3.RotationAround(r3.NewVec(math.MaxFloat64, 0, 0), axisZ, units.Degrees(180))
+		require.ErrorIs(t, err, r3.ErrNonFinite)
+		require.Equal(t, r3.Transform{}, tr)
+
+		// An ordinary pivot is untouched by the check.
+		center := r3.NewVec(10, 20, 30)
+		ok, err := r3.RotationAround(center, axisZ, units.Degrees(180))
+		require.NoError(t, err)
+		require.True(t, ok.IsValid())
+		require.True(t, ok.Apply(center).Equal(center, tol), "the center is fixed")
 	})
 
 	t.Run("Translation rejects a non-finite displacement", func(t *testing.T) {

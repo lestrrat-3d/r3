@@ -26,25 +26,43 @@
 //
 // A [Transform] is ALWAYS an isometry: distances and angles survive it, and
 // scale, shear and projection are unrepresentable rather than merely
-// discouraged — no constructor can produce one, because the fallible
-// constructors ([Translation], [Rotation], [RotationAround], [Reflection],
-// [FromFrame], [FromBasis]) validate what they produce, not merely what they
-// consume, and return an error otherwise. [Identity] is the only infallible one,
-// because it takes no input. That is what keeps [Transform.Inverse] exact: it is
-// the transpose, never a solve. It is also why a normal transforms exactly like
-// a direction ([Transform.ApplyDir]), with no inverse transpose anywhere in the
-// package.
+// discouraged. Nothing in the package can produce a non-isometry, because every
+// operation that yields a Transform — the constructors [Translation], [Rotation],
+// [RotationAround], [Reflection], [FromFrame], [FromBasis], and the derivations
+// [Transform.Then] and [Transform.Inverse] — validates what it produces, not
+// merely what it consumes, and returns an error otherwise. [Identity] is the only
+// infallible one, because it takes no input and has nothing to get wrong. That is
+// what keeps [Transform.Inverse] exact: it is the transpose, never a solve. It is
+// also why a normal transforms exactly like a direction ([Transform.ApplyDir]),
+// with no inverse transpose anywhere in the package.
 //
 // Nothing non-finite may enter either type. A NaN or infinite angle, position,
 // origin or translation is rejected with [ErrNonFinite] — and so is a
 // translation that OVERFLOWS to infinity while every input was individually
-// finite, which [Reflection] can do for a mirror plane far enough from the
-// origin. A Transform that exists is a real rigid motion, with no asterisk.
+// finite. That is not a corner case of one constructor: [Reflection] does it for
+// a mirror plane far enough from the origin, [RotationAround] for a pivot far
+// enough out, and [Transform.Then] and [Transform.Inverse] for the composition
+// or the inverse of transforms that are each themselves valid. All of them are
+// fallible, so all of them can say so. A Transform that exists is a real rigid
+// motion, with no asterisk.
+//
+// The price is that composing is fallible:
+//
+//	spin, err := r3.RotationAround(pivot, axis, units.Degrees(90)) // handle err
+//	lift, err := r3.Translation(r3.NewVec(0, 0, 5))                // handle err
+//	place, err := spin.Then(lift)                                  // handle err
+//	back, err := place.Inverse()                                   // handle err
+//
+// which is the honest bill for the invariant: an err that is always nil in
+// ordinary use is a small tax, and a silently infinite placement is not.
 //
 // [Vec.Normalize] returns a boolean rather than fabricating a unit vector from
-// a zero vector; it is a divide-by-zero guard, not a geometric tolerance. The
-// same refusal to invent geometry runs through the package: [Rotation] rejects a
-// zero axis instead of picking one, and rejects an angle that is not an angle —
-// including the zero units.Value, so a forgotten field cannot pass for a
-// deliberate 0°.
+// a zero vector; it is a divide-by-zero guard, not a geometric tolerance. But it
+// is a guard against zero, NOT against bigness: a vector whose length overflows,
+// such as (MaxFloat64, MaxFloat64, 0), still has a perfectly good direction, and
+// Normalize returns it. The same refusal to invent geometry — and the same
+// refusal to condemn geometry that is merely large — runs through the package:
+// [Rotation] rejects a zero axis instead of picking one, and rejects an angle
+// that is not an angle — including the zero units.Value, so a forgotten field
+// cannot pass for a deliberate 0°.
 package r3

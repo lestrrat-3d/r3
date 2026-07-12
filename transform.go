@@ -47,10 +47,15 @@ type Basis struct {
 //
 // The zero value Transform{} is invalid, as reported by [Transform.IsValid].
 // Build one with [Identity], [Translation], [Rotation], [RotationAround],
-// [Reflection], [FromFrame] or [FromBasis]. Those are the only ways to obtain
-// one, and none of them can produce a non-isometry: the fallible ones validate
-// their input and return an error. The invariant is enforced, not merely
-// documented.
+// [Reflection], [FromFrame] or [FromBasis], and derive others from it with
+// [Transform.Then] and [Transform.Inverse]. Those are the only ways to obtain
+// one, and none of them can produce a non-isometry: every one of them but
+// [Identity] is fallible, and each validates what it PRODUCES — not merely what
+// it consumes — returning [ErrNonFinite] rather than a Transform that is not a
+// rigid motion. Composition is included on purpose: two valid transforms can
+// compose to an overflowing translation, and a method that could hand that back
+// would sink the invariant just as surely as a careless constructor. The
+// invariant is enforced, not merely documented.
 type Transform struct {
 	ex, ey, ez Vec // images of the basis vectors — the linear part, by columns
 	t          Vec // translation
@@ -132,7 +137,11 @@ func rodrigues(v, n Vec, sin, cos float64) Vec {
 //
 // It returns the same errors as [Rotation], plus [ErrNonFinite] when center has
 // a NaN or infinite component — a rotation about a pivot that is nowhere is not
-// a rotation.
+// a rotation — and, like [Reflection], when the translation it COMPUTES is not
+// finite even though every input was. The composed offset is center − R·center,
+// so a pivot far enough out (near MaxFloat64) overflows to infinity. What is
+// validated is the RESULT; the check rides on [Transform.Then], which performs
+// it for every composition.
 func RotationAround(center, axis Vec, angle units.Value) (Transform, error) {
 	rot, err := Rotation(axis, angle)
 	if err != nil {
@@ -147,7 +156,11 @@ func RotationAround(center, axis Vec, angle units.Value) (Transform, error) {
 	if err != nil {
 		return Transform{}, err
 	}
-	return there.Then(rot).Then(back), nil
+	spun, err := there.Then(rot)
+	if err != nil {
+		return Transform{}, err
+	}
+	return spun.Then(back)
 }
 
 // Reflection returns the reflection across the plane of mirror — the plane
@@ -206,12 +219,15 @@ func householder(v, n Vec) Vec {
 //
 // To move a body from one frame to another, compose:
 //
-//	from, err := r3.FromFrame(a)  // handle err
-//	to, err := r3.FromFrame(b)    // handle err
-//	place := from.Inverse().Then(to)
+//	from, err := r3.FromFrame(a) // handle err
+//	to, err := r3.FromFrame(b)   // handle err
+//	out, err := from.Inverse()   // handle err
+//	place, err := out.Then(to)   // handle err
 //
 // which reads as "express the point in a's local coordinates, then plant those
-// coordinates in b".
+// coordinates in b". [Transform.Inverse] and [Transform.Then] are fallible for
+// the same reason the constructors are: the composed translation can overflow
+// even when both operands are impeccable.
 func FromFrame(f Frame) (Transform, error) {
 	if !f.Origin().isFinite() {
 		return Transform{}, ErrNonFinite
@@ -265,18 +281,31 @@ func (t Transform) ApplyDir(d Vec) Vec {
 }
 
 // Then composes: it returns the transform that applies t first and next second,
-// so a.Then(b).Apply(p) equals b.Apply(a.Apply(p)).
+// so a.Then(b) applied to p equals b.Apply(a.Apply(p)).
 //
 // Read it left to right, in application order. Note that this is the REVERSE of
 // matrix notation, where the same composition is written B·A — which is exactly
 // why the method is named Then and not Mul.
-func (t Transform) Then(next Transform) Transform {
-	return Transform{
+//
+// It returns [ErrNonFinite] when the composed translation overflows, which two
+// individually valid transforms can do: translating by MaxFloat64 along X, then
+// again by MaxFloat64 along X, lands at +Inf. That is why Then is fallible.
+// Composition is where the invariant would otherwise leak — a constructor that
+// validates what it produces buys nothing if a method can then produce an
+// unvalidated Transform out of two valid ones. The linear part cannot overflow
+// (an orthonormal basis mapped by an orthonormal basis stays bounded by 1), so
+// the translation is the whole of the check.
+func (t Transform) Then(next Transform) (Transform, error) {
+	out := Transform{
 		ex: next.ApplyDir(t.ex),
 		ey: next.ApplyDir(t.ey),
 		ez: next.ApplyDir(t.ez),
 		t:  next.Apply(t.t),
 	}
+	if !out.t.isFinite() {
+		return Transform{}, ErrNonFinite
+	}
+	return out, nil
 }
 
 // Inverse returns the transform that undoes t.
@@ -285,7 +314,13 @@ func (t Transform) Then(next Transform) Transform {
 // transpose — three dot products, never a matrix solve. This is the same
 // property [Frame.ToLocal] relies on, and it is the reason scale is excluded
 // from the type.
-func (t Transform) Inverse() Transform {
+//
+// It returns [ErrNonFinite] when the inverted translation overflows. Exactness
+// is not the same as safety: the inverse translation is −Lᵀ·t, and each of those
+// three dot products sums three products, so a huge-but-finite translation in a
+// rotated basis can carry a component past MaxFloat64 even though t itself was
+// perfectly valid. The result is validated, like everything else in the package.
+func (t Transform) Inverse() (Transform, error) {
 	// Transpose: the rows of the linear part become its columns.
 	inv := Transform{
 		ex: Vec{X: t.ex.X, Y: t.ey.X, Z: t.ez.X},
@@ -294,7 +329,10 @@ func (t Transform) Inverse() Transform {
 	}
 	// Undo the translation in the un-rotated frame: −Lᵀ·t.
 	inv.t = inv.ApplyDir(t.t).Scale(-1)
-	return inv
+	if !inv.t.isFinite() {
+		return Transform{}, ErrNonFinite
+	}
+	return inv, nil
 }
 
 // IsValid reports whether the linear part is orthonormal AND the translation is
