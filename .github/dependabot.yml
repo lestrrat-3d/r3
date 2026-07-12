@@ -6,6 +6,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # codeql-action ships its steps as separate sub-action paths (init,
+    # autobuild, analyze) that share a single release SHA. Ungrouped, one
+    # release lands as three PRs editing adjacent lines of the same workflow.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
 
   - package-ecosystem: gomod
     directory: /
