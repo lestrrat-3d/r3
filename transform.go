@@ -242,16 +242,20 @@ func (t Transform) Inverse() Transform {
 // IsValid reports whether the linear part is orthonormal, i.e. whether t is a
 // rigid motion. The zero value Transform{} is not valid. Use it to vet a
 // transform supplied by a caller before building geometry on it.
+//
+// A NaN or infinite component makes t invalid. Every check is phrased
+// positively (!(x <= tol) rather than x > tol) so that a comparison against NaN
+// — which is false whichever way it is written — rejects rather than admits.
 func (t Transform) IsValid() bool {
 	for _, v := range []Vec{t.ex, t.ey, t.ez} {
-		if math.Abs(v.Len()-1) > orthoTol {
+		if !(math.Abs(v.Len()-1) <= orthoTol) {
 			return false
 		}
 	}
-	if math.Abs(t.ex.Dot(t.ey)) > orthoTol {
+	if !(math.Abs(t.ex.Dot(t.ey)) <= orthoTol) {
 		return false
 	}
-	if math.Abs(t.ey.Dot(t.ez)) > orthoTol {
+	if !(math.Abs(t.ey.Dot(t.ez)) <= orthoTol) {
 		return false
 	}
 	return math.Abs(t.ez.Dot(t.ex)) <= orthoTol

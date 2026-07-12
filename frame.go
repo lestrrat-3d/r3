@@ -60,11 +60,15 @@ func (f Frame) N() Vec { return f.u.Cross(f.v) }
 // IsValid reports whether the frame's axes are unit length and mutually
 // orthogonal. The zero value Frame{} is not valid. Use it to vet a frame
 // supplied by a caller before building geometry on it.
+//
+// A NaN or infinite axis component makes f invalid. Every check is phrased
+// positively (!(x <= tol) rather than x > tol) so that a comparison against NaN
+// — which is false whichever way it is written — rejects rather than admits.
 func (f Frame) IsValid() bool {
-	if math.Abs(f.u.Len()-1) > orthoTol {
+	if !(math.Abs(f.u.Len()-1) <= orthoTol) {
 		return false
 	}
-	if math.Abs(f.v.Len()-1) > orthoTol {
+	if !(math.Abs(f.v.Len()-1) <= orthoTol) {
 		return false
 	}
 	return math.Abs(f.u.Dot(f.v)) <= orthoTol

@@ -1,6 +1,7 @@
 package r3_test
 
 import (
+	"math"
 	"testing"
 
 	"github.com/lestrrat-3d/r3"
@@ -43,4 +44,25 @@ func TestVecOps(t *testing.T) {
 	u, ok := r3.NewVec(0, 3, 0).Normalize()
 	require.True(t, ok)
 	vecEqual(t, r3.NewVec(0, 1, 0), u)
+}
+
+func TestVecNormalizeNaN(t *testing.T) {
+	t.Parallel()
+
+	// A NaN length compares false against any threshold, so the guard has to be
+	// an accept test: anything not provably long enough is rejected. Otherwise
+	// Normalize would hand back a NaN vector labelled as a unit direction.
+	for name, v := range map[string]r3.Vec{
+		"nan x": r3.NewVec(math.NaN(), 0, 0),
+		"nan y": r3.NewVec(1, math.NaN(), 0),
+		"nan z": r3.NewVec(0, 0, math.NaN()),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			n, ok := v.Normalize()
+			require.False(t, ok)
+			require.Equal(t, r3.Vec{}, n)
+		})
+	}
 }

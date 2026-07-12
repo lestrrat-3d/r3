@@ -321,6 +321,18 @@ func TestTransformDegenerateInput(t *testing.T) {
 		require.ErrorIs(t, err, r3.ErrDegenerateAxis)
 	})
 
+	t.Run("Rotation rejects a NaN axis", func(t *testing.T) {
+		t.Parallel()
+
+		// A NaN axis has no direction to rotate about; normalizing it would
+		// otherwise hand back a NaN "unit" vector and poison the whole transform.
+		_, err := r3.Rotation(r3.NewVec(math.NaN(), 0, 0), units.Degrees(90))
+		require.ErrorIs(t, err, r3.ErrDegenerateAxis)
+
+		_, err = r3.RotationAround(r3.NewVec(1, 1, 1), r3.NewVec(0, math.NaN(), 0), units.Degrees(90))
+		require.ErrorIs(t, err, r3.ErrDegenerateAxis)
+	})
+
 	t.Run("Rotation rejects a value that is not an angle", func(t *testing.T) {
 		t.Parallel()
 
@@ -354,12 +366,20 @@ func TestTransformDegenerateInput(t *testing.T) {
 	t.Run("FromBasis rejects a non-orthonormal basis", func(t *testing.T) {
 		t.Parallel()
 
-		// The back door a scale or shear would sneak in through.
+		nan := math.NaN()
+		inf := math.Inf(1)
+
+		// The back door a scale or shear would sneak in through. The non-finite
+		// cases matter because every comparison against NaN is false: a guard
+		// phrased as a rejection (x > tol) would let them through.
 		for name, b := range map[string]r3.Basis{
-			"zero":      {},
-			"scaled":    {EX: axisX.Scale(2), EY: axisY, EZ: axisZ},
-			"sheared":   {EX: axisX, EY: r3.NewVec(1, 1, 0), EZ: axisZ},
-			"collapsed": {EX: axisX, EY: axisX, EZ: axisZ},
+			"zero":                          {},
+			"scaled":                        {EX: axisX.Scale(2), EY: axisY, EZ: axisZ},
+			"sheared":                       {EX: axisX, EY: r3.NewVec(1, 1, 0), EZ: axisZ},
+			"collapsed":                     {EX: axisX, EY: axisX, EZ: axisZ},
+			"nan":                           {EX: axisX, EY: r3.NewVec(nan, 0, 0), EZ: axisZ},
+			"inf":                           {EX: axisX, EY: r3.NewVec(inf, 0, 0), EZ: axisZ},
+			"nan in an otherwise unit axis": {EX: r3.NewVec(1, nan, 0), EY: axisY, EZ: axisZ},
 		} {
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()

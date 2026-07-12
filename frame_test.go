@@ -36,6 +36,21 @@ func TestNewFrameDegenerate(t *testing.T) {
 	require.ErrorIs(t, err, r3.ErrDegenerateFrame)
 }
 
+func TestNewFrameNonFinite(t *testing.T) {
+	// Every comparison against NaN is false, so a guard phrased as a rejection
+	// would admit these; the frame that came back would not be orthonormal.
+	nan := math.NaN()
+
+	_, err := r3.NewFrame(r3.Vec{}, r3.NewVec(nan, 0, 0), r3.NewVec(0, 1, 0))
+	require.ErrorIs(t, err, r3.ErrDegenerateFrame)
+
+	_, err = r3.NewFrame(r3.Vec{}, r3.NewVec(1, 0, 0), r3.NewVec(0, nan, 0))
+	require.ErrorIs(t, err, r3.ErrDegenerateFrame)
+
+	_, err = r3.NewFrame(r3.Vec{}, r3.NewVec(math.Inf(1), 0, 0), r3.NewVec(0, 1, 0))
+	require.ErrorIs(t, err, r3.ErrDegenerateFrame, "an infinite axis normalizes to NaN")
+}
+
 func TestZeroFrameInvalid(t *testing.T) {
 	require.False(t, r3.Frame{}.IsValid())
 }

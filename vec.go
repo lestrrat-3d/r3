@@ -51,12 +51,16 @@ func (v Vec) Equal(o Vec, tol float64) bool {
 }
 
 // Normalize returns the unit vector along v and true, or the zero vector and
-// false when v is (near-)zero. The boolean is deliberate: unlike a
-// floor-against-zero helper, Normalize never fabricates a non-unit direction
-// from a zero vector — callers must handle the false case.
+// false when v is (near-)zero or has a NaN length. The boolean is
+// deliberate: unlike a floor-against-zero helper, Normalize never fabricates a
+// non-unit direction from a zero vector — callers must handle the false case.
+//
+// The guard is phrased positively (!(l >= zeroLen)): a NaN length compares
+// false whichever way the test is written, so it must fail the accept test
+// rather than pass a reject test.
 func (v Vec) Normalize() (Vec, bool) {
 	l := v.Len()
-	if l < zeroLen {
+	if !(l >= zeroLen) {
 		return Vec{}, false
 	}
 	return v.Scale(1 / l), true
