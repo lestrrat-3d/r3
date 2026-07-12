@@ -2,6 +2,7 @@ package r3_test
 
 import (
 	"math"
+	"math/rand/v2"
 	"testing"
 
 	"github.com/lestrrat-3d/r3"
@@ -158,13 +159,90 @@ func TestNewFrameUnrepresentableProjection(t *testing.T) {
 	require.True(t, f.Equal(small, 1e-12), "magnitude and dynamic range must not change the frame")
 }
 
+func TestNewFrameCollinearUnderflowingAxis(t *testing.T) {
+	t.Parallel()
+
+	// The silent-garbage case. u = (Max/2, 1e-20, 0) and v = 2·u are LITERALLY
+	// collinear — v is u scaled — so they span no plane and there is no frame to
+	// build. But collinearity used to be judged against a NORMALIZED u, and
+	// normalizing rounds: u.Normalize() is (0.9999999999999999, 0, 0), the 1e-20
+	// having underflowed away. Against THAT vector v has a perpendicular, so
+	// NewFrame invented a plane out of degenerate input and reported no error:
+	// U = X, V = Y, N = Z, IsValid() true. Collinearity is now decided by u × v on
+	// the axes AS GIVEN, where it is exactly zero.
+	u := r3.NewVec(math.MaxFloat64/2, 1e-20, 0)
+	_, err := r3.NewFrame(r3.Vec{}, u, u.Scale(2))
+	require.ErrorIs(t, err, r3.ErrDegenerateFrame, "v = 2·u spans no plane, whatever normalizing u rounds away")
+
+	// The same shape at other multiples, other scales, and in the other order. Every
+	// u here has a component that underflows to nothing when the axis is normalized,
+	// and every multiple is a power of two — exact, so each v is LITERALLY u scaled
+	// and not merely nearly so. There is nothing here for a frame to be built from.
+	for _, tc := range []struct {
+		u  r3.Vec
+		ks []float64
+	}{
+		{r3.NewVec(math.MaxFloat64/2, 1e-20, 0), []float64{1, 2, 0.5, -1, -2, -0.5}},
+		{r3.NewVec(1e-20, math.MaxFloat64/2, 0), []float64{1, 2, 0.5, -1, -2}},
+		{r3.NewVec(math.MaxFloat64/8, 1e-30, 1e-25), []float64{1, 2, 4, 0.5, -1, -2}},
+		{r3.NewVec(0, math.MaxFloat64/4, 1e-25), []float64{1, 2, 0.5, -1, -2}},
+		// Denormal scale: the whole axis down where the exponent has run out.
+		{r3.NewVec(8*math.SmallestNonzeroFloat64, math.SmallestNonzeroFloat64, 0), []float64{1, 2, 4, -1, -2}},
+	} {
+		for _, k := range tc.ks {
+			v := tc.u.Scale(k)
+			_, err := r3.NewFrame(r3.Vec{}, tc.u, v)
+			require.ErrorIs(t, err, r3.ErrDegenerateFrame, "u=%v, v=%v·u", tc.u, k)
+			// And collinearity does not care which axis is which.
+			_, err = r3.NewFrame(r3.Vec{}, v, tc.u)
+			require.ErrorIs(t, err, r3.ErrDegenerateFrame, "u=%v·u, v=%v", k, tc.u)
+		}
+	}
+
+	// The line between the two must stay where it belongs: a REAL angle, however
+	// small, is not collinearity, and is still accepted.
+	f, err := r3.NewFrame(r3.Vec{}, r3.NewVec(1, 0, 0), r3.NewVec(1, 1e-13, 0))
+	require.NoError(t, err, "a tiny angle is an angle")
+	require.True(t, f.IsValid())
+	require.True(t, f.V().Equal(r3.NewVec(0, 1, 0), 1e-12))
+}
+
+func TestNewFrameCollinearAtEveryScale(t *testing.T) {
+	t.Parallel()
+
+	// Collinear is collinear: at every ratio, sign, and magnitude float64 has. The
+	// ratios that are not powers of two round v off the line by a last bit, which is
+	// as collinear as float64 gets and must be refused all the same — crossFiltered's
+	// rounding band is what turns that residue back into the zero it stands for.
+	// (The ratios are kept where the scaled axis stays finite: an overflowing v is a
+	// different rejection, tested elsewhere.)
+	const max = math.MaxFloat64
+	for _, tc := range []struct {
+		u  r3.Vec
+		ks []float64
+	}{
+		{r3.NewVec(1, 0, 0), []float64{1, 2, 1.1, math.Pi, -1, -3.5, 0.25}},
+		{r3.NewVec(1, 2, 3), []float64{1, 2, 1.1, math.Pi, -1, -3.5, 0.25}},
+		{r3.NewVec(1e-300, -1e-300, 1e-300), []float64{1, 2, 1.1, math.Pi, -1, -3.5, 0.25}},
+		{r3.NewVec(max, max, max), []float64{1, 0.5, 0.25, -1, -0.5}},
+		{r3.NewVec(max/2, max/4, 0), []float64{1, 1.1, -1.9, 0.5, -0.25}},
+		{r3.NewVec(math.SmallestNonzeroFloat64, 2*math.SmallestNonzeroFloat64, 0), []float64{1, 2, 4, -1, -2}},
+	} {
+		for _, k := range tc.ks {
+			_, err := r3.NewFrame(r3.Vec{}, tc.u, tc.u.Scale(k))
+			require.ErrorIs(t, err, r3.ErrDegenerateFrame, "u=%v, ratio=%v", tc.u, k)
+		}
+	}
+}
+
 func TestNewFrameHandedness(t *testing.T) {
 	t.Parallel()
 
-	// The double cross product un × (v × un) is the Gram–Schmidt perpendicular; the
-	// OTHER operand order, un × (un × v), is that vector NEGATED. Get it wrong and V
-	// flips, which flips N = U × V, and the frame is silently left-handed. Nothing
-	// else in the package would notice. So pin the sign at both ends.
+	// perp = (u × v) × u is the Gram–Schmidt perpendicular times |u|², a POSITIVE
+	// multiple; the OTHER operand order at either cross gives that vector NEGATED.
+	// Get it wrong and V flips, which flips N = U × V, and the frame is silently
+	// left-handed. Nothing else in the package would notice. So pin the sign at both
+	// ends.
 
 	// The datum everyone knows: X, then Y, gives +Z. Not −Z.
 	xy := mkFrame(t, r3.Vec{}, r3.NewVec(1, 0, 0), r3.NewVec(0, 1, 0))
@@ -185,6 +263,27 @@ func TestNewFrameHandedness(t *testing.T) {
 		// Right-handed: the frame's own normal agrees with u × v, which is the
 		// handedness the caller asked for.
 		require.Positive(t, f.N().Dot(tc.u.Cross(tc.v)), "N must agree with u × v")
+	}
+
+	// The same two signs over ordinary random axes, which is where a flip would hide
+	// — a sign error is invisible in any single frame and shows up only against the
+	// input that fixed it. Every one of them must build, and be valid.
+	rng := rand.New(rand.NewPCG(17, 18))
+	for range 2000 {
+		u, v := randVec(rng), randVec(rng)
+		// Skip pairs that are near-collinear by chance: the frame is legitimate but
+		// the sign of a dot product against a perpendicular that is mostly rounding
+		// noise says nothing.
+		if u.Cross(v).Len() < 1e-6 {
+			continue
+		}
+		f, err := r3.NewFrame(randVec(rng), u, v)
+		require.NoError(t, err, "u=%v, v=%v", u, v)
+		require.True(t, f.IsValid(), "u=%v, v=%v", u, v)
+		require.Positive(t, f.V().Dot(v), "V flipped: u=%v, v=%v", u, v)
+		require.Positive(t, f.N().Dot(u.Cross(v)), "N flipped: u=%v, v=%v", u, v)
+		require.InDelta(t, 0, f.U().Dot(f.V()), 1e-12)
+		require.InDelta(t, 1, f.N().Len(), 1e-12)
 	}
 }
 

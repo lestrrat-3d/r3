@@ -171,6 +171,51 @@ func (v Vec) crossFiltered(o Vec) Vec {
 	}
 }
 
+// crossFilteredSafe returns [Vec.crossFiltered] of v and o, retaken with shrunken
+// operands if the cross product overflowed. Both v and o MUST be finite; the result
+// then always is, and it is zero exactly when v and o are collinear (or one of them
+// is zero).
+//
+// A cross product component is a difference of two products, a·b − c·d, and NEITHER
+// stage is safe at the top of the range: the products themselves reach MaxFloat64²
+// when BOTH operands are large (u × v for u = (Max, Max, Max), v = (Max, Max, −Max)),
+// and even bounded products can differ by 2·MaxFloat64. So on overflow the cross is
+// retaken with v reduced to its DIRECTION — components then at most 1, so no product
+// can overflow — and o quartered, so no difference can either. That pair is finite
+// unconditionally, and one retry therefore always suffices.
+//
+// Overflow is detected on the UNFILTERED [Vec.Cross], and that is not an
+// optimization but a necessity: [diffProd]'s rounding band is proportional to the
+// two products, so when a product is itself ±Inf the band is +Inf, every difference
+// lies inside it, and the filter reports the overflow as an exact ZERO — which reads
+// as "collinear". The band's whole justification (that the products are finite
+// numbers, each carrying at most a unit-roundoff of error) is gone at that point.
+// Cross computes the same products and has no band, so ±Inf and NaN reach the
+// finiteness test where they can be acted on.
+//
+// Shrinking is safe HERE and would NOT be safe on the path that did not overflow.
+// Reducing v to its direction is an exponent-strip that can flush a component 10³⁰⁰
+// times smaller than v's largest one to zero — precisely the annihilation that must
+// never befall a small-but-decisive component. But it runs only when the true cross
+// product has magnitude past MaxFloat64, where what is flushed is that same 10⁻³⁰⁰
+// of an enormous answer and could not have moved its direction. When the cross does
+// NOT overflow — the path a denormal perpendicular takes, and the only path most
+// callers ever take — nothing is scaled at all, and the denormal that is the entire
+// answer survives.
+func (v Vec) crossFilteredSafe(o Vec) Vec {
+	if v.Cross(o).isFinite() {
+		return v.crossFiltered(o)
+	}
+	// Only a finite, non-zero v can make a cross product overflow, so direction
+	// cannot fail here; if it somehow did, the zero vector is the honest answer —
+	// the caller reads it as degenerate rather than as a direction.
+	vd, ok := v.direction()
+	if !ok {
+		return Vec{}
+	}
+	return vd.crossFiltered(o.Scale(0.25))
+}
+
 // direction returns the unit vector along v and true, or false when v has no
 // direction at all: v is exactly zero, or some component is NaN or infinite. It
 // is [Vec.Normalize] without the zeroLen floor — the magnitude is stripped by an

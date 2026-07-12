@@ -74,11 +74,13 @@
 // away, and a mirror plane at (MaxFloat64, 0, 1e-20) would then be reflected
 // across as if it passed through the origin — silently, since nothing about the
 // answer is infinite or NaN. Where a whole vector must be scaled down for headroom
-// — [NewFrame]'s Gram–Schmidt subtraction, whose exact result can want a component
-// past MaxFloat64 — it is done only when the unscaled arithmetic actually
-// overflows, because scaling down unconditionally underflows a decisive denormal
-// and calls THAT degenerate. These paths run once per frame or per feature, so the
-// care costs nothing.
+// — [NewFrame]'s cross products, whose exact result can want a component past
+// MaxFloat64 — it is done only when the unscaled arithmetic actually overflows,
+// because scaling down unconditionally underflows a decisive denormal and calls
+// THAT degenerate. For the same reason NewFrame judges collinearity on the axes AS
+// GIVEN: normalizing an axis first rounds, and the tiny component it rounds away
+// can be the whole evidence that two axes span no plane at all. These paths run
+// once per frame or per feature, so the care costs nothing.
 //
 // The PER-POINT mappings are the accepted exception, and there are five of them:
 // [Transform.Apply], [Transform.ApplyDir], [Frame.ToWorld], [Frame.ToWorldUV] and
