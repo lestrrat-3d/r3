@@ -333,6 +333,41 @@ func TestTransformDegenerateInput(t *testing.T) {
 		require.ErrorIs(t, err, r3.ErrDegenerateAxis)
 	})
 
+	t.Run("Rotation rejects an infinite axis", func(t *testing.T) {
+		t.Parallel()
+
+		// An infinite axis is degenerate for the same reason a zero one is: there
+		// is no finite direction to rotate about. It used to slip past the length
+		// guard, and scaling by 1/Inf then produced a NaN "unit" axis, so Rotation
+		// returned a nil error alongside a transform that mapped every point to
+		// NaN — a constructor handing back a non-isometry.
+		rot, err := r3.Rotation(r3.NewVec(math.Inf(1), 0, 0), units.Degrees(90))
+		require.ErrorIs(t, err, r3.ErrDegenerateAxis)
+		require.Equal(t, r3.Transform{}, rot)
+
+		_, err = r3.Rotation(r3.NewVec(0, 0, math.Inf(-1)), units.Degrees(90))
+		require.ErrorIs(t, err, r3.ErrDegenerateAxis)
+
+		_, err = r3.RotationAround(r3.NewVec(1, 1, 1), r3.NewVec(0, math.Inf(1), 0), units.Degrees(90))
+		require.ErrorIs(t, err, r3.ErrDegenerateAxis)
+	})
+
+	t.Run("Rotation accepts a huge but finite axis", func(t *testing.T) {
+		t.Parallel()
+
+		// The axis is finite, so it has a direction: (1e200, 1e200, 1e200)
+		// normalizes like (1, 1, 1) does. A sum-of-squares length would have
+		// overflowed to +Inf and scaled the axis flat to (0, 0, 0), yielding a nil
+		// error and a broken transform.
+		huge, err := r3.Rotation(r3.NewVec(1e200, 1e200, 1e200), units.Degrees(120))
+		require.NoError(t, err)
+		require.True(t, huge.IsValid())
+
+		unit, err := r3.Rotation(r3.NewVec(1, 1, 1), units.Degrees(120))
+		require.NoError(t, err)
+		require.True(t, huge.Equal(unit, 1e-12), "magnitude must not change the rotation")
+	})
+
 	t.Run("Rotation rejects a value that is not an angle", func(t *testing.T) {
 		t.Parallel()
 

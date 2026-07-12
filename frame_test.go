@@ -47,8 +47,13 @@ func TestNewFrameNonFinite(t *testing.T) {
 	_, err = r3.NewFrame(r3.Vec{}, r3.NewVec(1, 0, 0), r3.NewVec(0, nan, 0))
 	require.ErrorIs(t, err, r3.ErrDegenerateFrame)
 
+	// An infinite axis has infinite length, which is not a usable direction:
+	// Normalize rejects it outright rather than dividing through by +Inf.
 	_, err = r3.NewFrame(r3.Vec{}, r3.NewVec(math.Inf(1), 0, 0), r3.NewVec(0, 1, 0))
-	require.ErrorIs(t, err, r3.ErrDegenerateFrame, "an infinite axis normalizes to NaN")
+	require.ErrorIs(t, err, r3.ErrDegenerateFrame, "an infinite u axis has no direction")
+
+	_, err = r3.NewFrame(r3.Vec{}, r3.NewVec(1, 0, 0), r3.NewVec(0, math.Inf(-1), 0))
+	require.ErrorIs(t, err, r3.ErrDegenerateFrame, "an infinite v axis has no direction")
 }
 
 func TestZeroFrameInvalid(t *testing.T) {

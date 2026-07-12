@@ -38,7 +38,14 @@ func (v Vec) Cross(o Vec) Vec {
 }
 
 // Len returns the Euclidean length of v.
-func (v Vec) Len() float64 { return math.Sqrt(v.Dot(v)) }
+//
+// It is computed by nested [math.Hypot] rather than the naive sqrt of the sum of
+// squares: squaring a large-but-finite component overflows to +Inf (e.g. 1e200²)
+// and a small one underflows to 0, so the naive form reports an infinite length
+// for a perfectly representable vector. Hypot scales internally and so is exact
+// over the whole finite range. Len is +Inf only if some component is infinite,
+// and NaN only if some component is NaN.
+func (v Vec) Len() float64 { return math.Hypot(math.Hypot(v.X, v.Y), v.Z) }
 
 // Equal reports whether v and o agree componentwise within tol. It is a
 // tolerant comparison for floating-point results, not an exact one: two vectors
@@ -51,16 +58,27 @@ func (v Vec) Equal(o Vec, tol float64) bool {
 }
 
 // Normalize returns the unit vector along v and true, or the zero vector and
-// false when v is (near-)zero or has a NaN length. The boolean is
-// deliberate: unlike a floor-against-zero helper, Normalize never fabricates a
-// non-unit direction from a zero vector — callers must handle the false case.
+// false when v has no usable direction. The boolean is deliberate: unlike a
+// floor-against-zero helper, Normalize never fabricates a non-unit direction —
+// callers must handle the false case.
 //
-// The guard is phrased positively (!(l >= zeroLen)): a NaN length compares
-// false whichever way the test is written, so it must fail the accept test
-// rather than pass a reject test.
+// A direction is usable only when v's length is a finite number of at least
+// zeroLen. So:
+//
+//   - v is (near-)zero, or any component is NaN: false.
+//   - any component is infinite: false. There is no finite direction to report,
+//     and dividing through by +Inf would silently flatten v to the zero vector.
+//   - v is huge but finite, e.g. (1e200, 1e200, 1e200): true, with the correct
+//     unit vector. [Vec.Len] does not overflow, so such a vector normalizes like
+//     any other rather than being rejected.
+//
+// The guard is phrased positively (!(accept) rather than reject): a NaN length
+// compares false whichever way the test is written, so it must fail the accept
+// test rather than pass a reject test. l <= [math.MaxFloat64] is the finiteness
+// half — a length is never negative, so only +Inf (and NaN) can fail it.
 func (v Vec) Normalize() (Vec, bool) {
 	l := v.Len()
-	if !(l >= zeroLen) {
+	if !(l >= zeroLen && l <= math.MaxFloat64) {
 		return Vec{}, false
 	}
 	return v.Scale(1 / l), true

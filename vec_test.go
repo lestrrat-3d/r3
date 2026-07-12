@@ -46,16 +46,23 @@ func TestVecOps(t *testing.T) {
 	vecEqual(t, r3.NewVec(0, 1, 0), u)
 }
 
-func TestVecNormalizeNaN(t *testing.T) {
+func TestVecNormalizeNonFinite(t *testing.T) {
 	t.Parallel()
 
 	// A NaN length compares false against any threshold, so the guard has to be
-	// an accept test: anything not provably long enough is rejected. Otherwise
+	// an accept test: anything not provably usable is rejected. Otherwise
 	// Normalize would hand back a NaN vector labelled as a unit direction.
+	//
+	// An infinite length is the mirror image: it sails through a lower-bound
+	// check, and then 1/Inf == 0 scales the vector flat, so Normalize would
+	// report the zero vector as a valid unit direction.
 	for name, v := range map[string]r3.Vec{
-		"nan x": r3.NewVec(math.NaN(), 0, 0),
-		"nan y": r3.NewVec(1, math.NaN(), 0),
-		"nan z": r3.NewVec(0, 0, math.NaN()),
+		"nan x":  r3.NewVec(math.NaN(), 0, 0),
+		"nan y":  r3.NewVec(1, math.NaN(), 0),
+		"nan z":  r3.NewVec(0, 0, math.NaN()),
+		"+inf x": r3.NewVec(math.Inf(1), 0, 0),
+		"-inf y": r3.NewVec(1, math.Inf(-1), 0),
+		"+inf z": r3.NewVec(0, 0, math.Inf(1)),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -65,4 +72,22 @@ func TestVecNormalizeNaN(t *testing.T) {
 			require.Equal(t, r3.Vec{}, n)
 		})
 	}
+}
+
+func TestVecNormalizeHugeFinite(t *testing.T) {
+	t.Parallel()
+
+	// The components are finite and perfectly representable, but their squares
+	// are not: 1e200² overflows to +Inf, so a sum-of-squares length would report
+	// +Inf and scaling by 1/Inf would flatten the vector to (0, 0, 0) — a zero
+	// vector announced as a unit direction. Len avoids squaring, so this
+	// normalizes correctly rather than being rejected.
+	v := r3.NewVec(1e200, 1e200, 1e200)
+	require.InDelta(t, math.Sqrt(3)*1e200, v.Len(), 1e188, "Len must not overflow")
+
+	n, ok := v.Normalize()
+	require.True(t, ok, "a huge but finite vector has a direction")
+	c := 1 / math.Sqrt(3)
+	vecEqual(t, r3.NewVec(c, c, c), n)
+	require.InDelta(t, 1, n.Len(), 1e-12, "the result is a unit vector")
 }
