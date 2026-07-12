@@ -114,7 +114,19 @@ it *is* a shape, it does not.
     `MaxFloat64` you must check the returned `Vec`. Everywhere a real model lives,
     this cannot arise.
 - **`Transform.Inverse` is exact** — the transpose of an orthogonal matrix, never
-  a solve. Admitting scale would cost this.
+  a solve. Admitting scale would cost this, and so would storing a basis that is
+  only *nearly* orthonormal: the transpose inverts a **truly** orthonormal basis and
+  nothing else, and one skewed by even `7e-10` round-trips with a drift of ~`1e-8`.
+  So the linear part of every `Transform` is orthonormal to machine precision, not
+  merely inside the `1e-9` tolerance that *admits* one — `FromBasis`, the door a
+  reloaded basis comes in through, **orthonormalizes** what it admits (Gram–Schmidt,
+  as `NewFrame` does for a frame's axes) rather than storing it verbatim. What is
+  *admitted* is unchanged: a scale, a shear or a collapse is still `ErrNotOrthonormal`,
+  never silently corrected into a transform you did not describe. Only tolerance-level
+  drift is snapped straight — and **handedness survives it**: a reflection
+  (`det = −1`) comes back a reflection, because all three vectors are orthonormalized
+  in turn instead of the third being re-derived as `EX × EY`, which would flip an
+  improper basis proper without a word.
 - **A normal transforms like a direction** (`ApplyDir`). No inverse transpose,
   anywhere. Under a general affine map normals need one and everybody forgets;
   here it cannot be got wrong.

@@ -98,6 +98,38 @@ func TestNewFrameExtremeDynamicRangeAxis(t *testing.T) {
 	require.InDelta(t, 0, f.U().Dot(f.V()), 1e-12)
 }
 
+func TestNewFrameDenormalPerpendicular(t *testing.T) {
+	t.Parallel()
+
+	// The far end of the dynamic range, and the same class of bug as the 1e-20 case
+	// above: v = (Max, SmallestNonzeroFloat64, 0) against u = X is finite and plainly
+	// NOT collinear — its perpendicular component is that denormal along Y. But v was
+	// quartered UNCONDITIONALLY before the projection was subtracted off, to buy
+	// overflow headroom, and quartering the smallest denormal there is underflows it
+	// to zero. The perpendicular vanished and NewFrame reported "zero or collinear
+	// axes". The headroom is now bought only when the unscaled subtraction actually
+	// overflows.
+	f, err := r3.NewFrame(r3.Vec{}, r3.NewVec(1, 0, 0), r3.NewVec(math.MaxFloat64, math.SmallestNonzeroFloat64, 0))
+	require.NoError(t, err, "a denormal perpendicular is still a perpendicular")
+	require.True(t, f.IsValid())
+	require.True(t, f.U().Equal(r3.NewVec(1, 0, 0), 1e-12))
+	require.True(t, f.V().Equal(r3.NewVec(0, 1, 0), 1e-12), "the perpendicular is the denormal Y component")
+	require.True(t, f.N().Equal(r3.NewVec(0, 0, 1), 1e-12))
+
+	// And the case the quartering was introduced FOR must still work: the true
+	// perpendicular of these two wants a component past MaxFloat64, so the unscaled
+	// subtraction overflows and the quartered path takes over.
+	const max = math.MaxFloat64
+	g, err := r3.NewFrame(r3.Vec{}, r3.NewVec(max, max, max), r3.NewVec(max, max, -max))
+	require.NoError(t, err, "the overflow path must still be there when it is needed")
+	require.True(t, g.IsValid())
+	require.InDelta(t, 0, g.U().Dot(g.V()), 1e-12)
+
+	// Both extremes, not one at the cost of the other.
+	small := mkFrame(t, r3.Vec{}, r3.NewVec(1, 1, 1), r3.NewVec(1, 1, -1))
+	require.True(t, g.Equal(small, 1e-12), "magnitude must not change the frame")
+}
+
 func TestNewFrameNonFinite(t *testing.T) {
 	// Every comparison against NaN is false, so a guard phrased as a rejection
 	// would admit these; the frame that came back would not be orthonormal.

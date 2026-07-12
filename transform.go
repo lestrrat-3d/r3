@@ -16,9 +16,10 @@ var ErrDegenerateAxis = errors.New("r3: degenerate rotation axis (zero vector)")
 // ErrNotOrthonormal is returned when the linear part of a Transform is not made
 // of unit-length, mutually orthogonal vectors, so it describes a scale, a shear
 // or a collapse rather than a rigid motion. [FromBasis] returns it for a basis
-// handed to it; [Transform.Then] and [Transform.Inverse] return it for the
-// linear part they COMPUTE, which orthonormality tolerance alone does not keep
-// orthonormal (see [Transform.Then]).
+// handed to it that is not orthonormal WITHIN TOLERANCE — a scale, a shear, a
+// collapse; a skew merely at the tolerance level is snapped straight rather than
+// refused, see [FromBasis]. [Transform.Then] and [Transform.Inverse] return it
+// for the linear part they COMPUTE (see [Transform.Then]).
 var ErrNotOrthonormal = errors.New("r3: basis is not orthonormal")
 
 // Basis is the linear part of a [Transform]: the images of the world basis
@@ -272,17 +273,84 @@ func FromFrame(f Frame) (Transform, error) {
 // the way a stored transform comes back from disk.
 //
 // It returns [ErrNotOrthonormal] unless b's vectors are unit length and mutually
-// orthogonal, and [ErrNonFinite] when t is not finite. Those checks are what stop
-// FromBasis from being a back door: neither a scale, nor a shear, nor a NaN
-// position can enter the type through it. The translation is checked first, so a
-// bad t is reported as the non-finite value it is instead of as a complaint about
-// a basis that was perfectly fine.
+// orthogonal WITHIN [Transform.IsValid]'s tolerance (1e-9), and [ErrNonFinite] when t
+// is not finite. Those checks are what stop FromBasis from being a back door:
+// neither a scale, nor a shear, nor a NaN position can enter the type through it.
+// The translation is checked first, so a bad t is reported as the non-finite value
+// it is instead of as a complaint about a basis that was perfectly fine.
+//
+// # The basis is orthonormalized, not stored verbatim
+//
+// The tolerance admits a basis that is very slightly skewed — a round-trip
+// through a text format, or a rotation matrix that has been multiplied a few
+// times, comes back with an EX·EY of, say, 7e-10 rather than 0. Such a basis used
+// to be STORED as it arrived, and that quietly falsified the package's headline
+// claim: the transpose is the exact inverse of a TRULY orthonormal basis and of
+// nothing else, so [Transform.Inverse] of such a transform was not exact — a point
+// at (10, 10, 0) came back some 1e-8 away from where it started.
+//
+// So FromBasis validates first and then ORTHONORMALIZES what it admitted (Gram–
+// Schmidt, exactly as [NewFrame] does for a Frame's axes), and it is the
+// orthonormalized basis that is stored. Every Transform in this package therefore
+// holds a linear part that is orthonormal to machine precision, and "Inverse is
+// exact" is true without an asterisk. The two halves are not in tension: the
+// tolerance decides what is ADMITTED, and it is unchanged — a scale, a shear, a
+// collapse, a 45° skew are all still refused, because snapping those straight
+// would silently return a transform that is not the one the caller described. It
+// only decides what is CORRECTED, which is drift at the level of the tolerance
+// itself.
+//
+// Orthonormalizing preserves HANDEDNESS. An improper basis (det = −1, a
+// reflection) survives with [Transform.IsReflection] still true, because all three
+// vectors are Gram–Schmidt'ed in turn — EZ is made perpendicular to the corrected
+// EX and EY, never REPLACED by EX × EY, which would flip an improper basis proper
+// without a word.
 func FromBasis(b Basis, t Vec) (Transform, error) {
 	out := Transform{ex: b.EX, ey: b.EY, ez: b.EZ, t: t}
 	if err := out.validate(); err != nil {
 		return Transform{}, err
 	}
-	return out, nil
+	on, ok := orthonormalize(b)
+	if !ok {
+		// Unreachable: validate has just established that all three vectors are
+		// within 1e-9 of unit length and of mutual orthogonality, so no length here
+		// is anywhere near zero. Kept because a silently non-unit basis is precisely
+		// what this constructor exists to refuse.
+		return Transform{}, ErrNotOrthonormal
+	}
+	return Transform{ex: on.EX, ey: on.EY, ez: on.EZ, t: t}, nil
+}
+
+// orthonormalize returns the Gram–Schmidt orthonormalization of b, or false when
+// some vector has no direction left after the projections are removed. It is only
+// ever handed a basis that is already orthonormal within tolerance, so the
+// projections it removes are tiny and the false case cannot arise; the boolean is
+// the guard, not a workhorse.
+//
+// It is the SIGN OF THE DETERMINANT that dictates the shape of this: all three
+// vectors go through the procedure, EZ included. Gram–Schmidt is the QR
+// factorisation with a positive diagonal in R, so det(Q) has the sign of det(b) —
+// an improper basis comes out improper, a proper one proper. The tempting
+// shortcut — orthonormalize EX and EY, then set EZ = EX × EY — always produces a
+// RIGHT-handed result, and would turn a reflection into a rotation while reporting
+// nothing.
+func orthonormalize(b Basis) (Basis, bool) {
+	ex, ok := b.EX.Normalize()
+	if !ok {
+		return Basis{}, false
+	}
+	// Remove EX's component from EY. dotUnit, because ex is a unit vector.
+	ey, ok := b.EY.Sub(ex.Scale(b.EY.dotUnit(ex))).Normalize()
+	if !ok {
+		return Basis{}, false
+	}
+	// And both of theirs from EZ — deriving it as EX × EY instead would discard the
+	// handedness that EZ is the only remaining witness of.
+	ez, ok := b.EZ.Sub(ex.Scale(b.EZ.dotUnit(ex))).Sub(ey.Scale(b.EZ.dotUnit(ey))).Normalize()
+	if !ok {
+		return Basis{}, false
+	}
+	return Basis{EX: ex, EY: ey, EZ: ez}, true
 }
 
 // Apply maps a point: the linear part, then the translation.
@@ -371,12 +439,16 @@ func (t Transform) ApplyDir(d Vec) Vec {
 //
 // It returns [ErrNotOrthonormal] when the composed linear part is not orthonormal
 // within tolerance. This is NOT an overflow — the images of unit vectors under an
-// orthonormal basis stay bounded — it is the tolerance itself accumulating.
-// Orthonormality is judged with slack (1e-9), so a basis whose EX·EY is 7e-10 is
-// admitted; composing that transform with itself doubles the error to 1.4e-9,
-// which is outside the tolerance. Two valid transforms, an invalid product: the
-// linear part has to be checked, not reasoned away. The same check rejects a
-// zero-value receiver or argument, whose zero basis composes to a zero basis.
+// orthonormal basis stay bounded — it is orthonormality error accumulating.
+// Orthonormality is judged with slack (1e-9), and slack composes: a linear part
+// whose EX·EY is 7e-10 is inside the tolerance and IsValid says so, yet composed
+// with itself it doubles to 1.4e-9, which is outside. Two valid transforms, an
+// invalid product: the linear part has to be checked, not reasoned away. That the
+// constructors now leave no slack of their own to compose ([FromBasis]
+// orthonormalizes; [Rotation] and [Reflection] are exact bar rounding) shrinks the
+// case, it does not close it — rounding still accumulates over a long chain, and
+// the same check rejects a zero-value receiver or argument, whose zero basis
+// composes to a zero basis.
 func (t Transform) Then(next Transform) (Transform, error) {
 	out := Transform{
 		ex: next.ApplyDir(t.ex),
@@ -414,6 +486,15 @@ func (t Transform) validate() error {
 // transpose — three dot products, never a matrix solve. This is the same
 // property [Frame.ToLocal] relies on, and it is the reason scale is excluded
 // from the type.
+//
+// Exact means exact, and that rests on every Transform holding a linear part that
+// is orthonormal to machine precision rather than merely within the 1e-9 tolerance
+// that ADMITS one. The transpose is the exact inverse of a truly orthonormal basis
+// and of nothing else: for a basis skewed by even 7e-10 it is only an
+// approximation, and the round trip drifts by about 1e-8 — which is why
+// [FromBasis], the one door such a basis could come in through, orthonormalizes
+// what it admits. Round-tripping a point through Inverse therefore returns it to
+// within a few ulps, not to within the tolerance.
 //
 // It returns [ErrNonFinite] when the inverted translation overflows. Exactness
 // is not the same as safety: the inverse translation is −Lᵀ·t, and each of those

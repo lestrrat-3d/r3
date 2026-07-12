@@ -19,3 +19,13 @@ func FrameWithOrigin(origin Vec) Frame {
 func TransformWithTranslation(t Vec) Transform {
 	return Transform{ex: Vec{X: 1}, ey: Vec{Y: 1}, ez: Vec{Z: 1}, t: t}
 }
+
+// TransformWithBasis returns a transform with the given linear part and
+// translation, bypassing both the validation AND the orthonormalization FromBasis
+// performs. It exists so the external test can build the one state no exported
+// constructor will produce any more — a linear part skewed WITHIN the
+// orthonormality tolerance — and assert that [Transform.Then] still refuses the
+// composition once that skew has doubled past it.
+func TransformWithBasis(b Basis, t Vec) Transform {
+	return Transform{ex: b.EX, ey: b.EY, ez: b.EZ, t: t}
+}

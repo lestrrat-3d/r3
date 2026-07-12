@@ -45,24 +45,29 @@ type Frame struct {
 // collinear AXES.
 //
 // Axis MAGNITUDE is not a reason for refusal, however large, and neither is a
-// wide dynamic range WITHIN an axis. Two things make that so, and both are exact
-// powers of two, so neither costs a mantissa bit:
+// wide dynamic range WITHIN an axis — down to the smallest denormal. Three things
+// make that so, and the scalings among them are exact powers of two, so none costs
+// a mantissa bit:
 //
 //   - The projection v·un is taken with [Vec.dotUnit], which scales the three
 //     PRODUCTS rather than v, so the perpendicular of u = (1, 0, 0) with
 //     v = (MaxFloat64, 1e-20, 0) — finite, plainly not collinear — is the 1e-20
 //     it actually is, not the zero that scaling v by its own largest component
 //     would have made of it.
-//   - v is then quartered before the projection is subtracted off. The true
-//     perpendicular of two finite axes can have components past MaxFloat64
-//     (u = (MaxFloat64, MaxFloat64, MaxFloat64) with
-//     v = (MaxFloat64, MaxFloat64, −MaxFloat64) is such a pair), so the subtraction
-//     is done a quarter of the way down, where it cannot overflow. Only the
-//     DIRECTION of the perpendicular is wanted, and direction is scale-invariant,
-//     so the quarter is never undone. For the same reason the perpendicular is
-//     normalized scale-free (see [Vec.direction]) rather than through
-//     [Vec.Normalize], whose zeroLen floor is sized for vectors of order one and
-//     would call a legitimate 1e-20 perpendicular "degenerate" for being small.
+//   - The projection is subtracted off UNSCALED, and only redone with v quartered
+//     when that overflows. The true perpendicular of two finite axes can have
+//     components past MaxFloat64 (u = (MaxFloat64, MaxFloat64, MaxFloat64) with
+//     v = (MaxFloat64, MaxFloat64, −MaxFloat64) is such a pair), and there the
+//     subtraction must be done a quarter of the way down, where it cannot overflow;
+//     the quarter is never undone, since only the DIRECTION of the perpendicular is
+//     wanted and direction is scale-invariant. But quartering UNCONDITIONALLY buys
+//     that headroom at the far end's expense: it underflows the smallest denormals,
+//     and for v = (MaxFloat64, SmallestNonzeroFloat64, 0) against u = (1, 0, 0) the
+//     denormal is the whole of the perpendicular. So the headroom is bought only
+//     when it is needed.
+//   - The perpendicular is normalized scale-free (see [Vec.direction]) rather than
+//     through [Vec.Normalize], whose zeroLen floor is sized for vectors of order one
+//     and would call a legitimate 1e-20 perpendicular "degenerate" for being small.
 //
 // Without all three, NewFrame reported "degenerate axes" about axes that were
 // nothing of the kind.
@@ -74,18 +79,34 @@ func NewFrame(origin, u, v Vec) (Frame, error) {
 	if !ok {
 		return Frame{}, ErrDegenerateFrame
 	}
-	// Quarter v — an exact, bit-for-bit scaling that is never undone, since only
-	// the direction of the perpendicular is wanted. It buys headroom: the true
-	// perpendicular of two finite axes can want a component past MaxFloat64, and
-	// an overflow to ±Inf here is indistinguishable from a vanishing perpendicular
-	// — a false "degenerate". Quartered, |vsᵢ| <= ¼·Max and |unᵢ·(vs·un)| <=
-	// (√3/4)·Max, so their difference stays under Max.
-	vs := v.Scale(0.25)
 	// Remove the u-component of v, leaving the in-plane perpendicular. The
 	// projection goes through dotUnit — un is a unit vector — so a v holding an
 	// enormous component alongside a tiny one keeps the tiny one, which is often
 	// the whole of the perpendicular.
-	vp := vs.Sub(un.Scale(vs.dotUnit(un)))
+	//
+	// Do it UNSCALED first. The true perpendicular of two finite axes can want a
+	// component past MaxFloat64 (u = (MaxFloat64, MaxFloat64, MaxFloat64) with
+	// v = (MaxFloat64, MaxFloat64, −MaxFloat64) is such a pair), and quartering v
+	// beforehand buys the headroom that keeps the subtraction from overflowing to
+	// ±Inf — an overflow being indistinguishable from a vanishing perpendicular, and
+	// so a false "degenerate". But quartering is not free at the OTHER end of the
+	// range: it flushes the smallest denormals to zero, and with
+	// v = (MaxFloat64, SmallestNonzeroFloat64, 0) against u = X the denormal IS the
+	// perpendicular — quarter it away and NewFrame reports "degenerate axes" about
+	// axes that are finite and plainly not collinear.
+	//
+	// So buy the headroom only when it is actually needed. The unscaled subtraction
+	// keeps every component v had; it is redone quartered only if it came back
+	// non-finite, which is exactly the overflow case (a NaN or infinite v lands here
+	// too, and is rejected below either way). Quartered, |vsᵢ| <= ¼·Max and
+	// |unᵢ·(vs·un)| <= (√3/4)·Max, so their difference stays under Max. The quarter
+	// is exact, bit for bit, and is never undone: only the DIRECTION of the
+	// perpendicular is wanted, and direction is scale-invariant.
+	vp := v.Sub(un.Scale(v.dotUnit(un)))
+	if !vp.isFinite() {
+		vs := v.Scale(0.25)
+		vp = vs.Sub(un.Scale(vs.dotUnit(un)))
+	}
 	// The perpendicular is taken for its DIRECTION, so it is normalized scale-free:
 	// its length is legitimately 1e-20 for v = (MaxFloat64, 1e-20, 0), and
 	// Normalize's zeroLen floor — a divide-by-zero guard sized for vectors of order

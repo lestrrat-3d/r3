@@ -35,10 +35,24 @@
 // [RotationAround], [Reflection], [FromFrame], [FromBasis], and the derivations
 // [Transform.Then] and [Transform.Inverse] — validates what it produces, not
 // merely what it consumes, and returns an error otherwise. [Identity] is the only
-// infallible one, because it takes no input and has nothing to get wrong. That is
-// what keeps [Transform.Inverse] exact: it is the transpose, never a solve. It is
-// also why a normal transforms exactly like a direction ([Transform.ApplyDir]),
-// with no inverse transpose anywhere in the package.
+// infallible one, because it takes no input and has nothing to get wrong. It is
+// why a normal transforms exactly like a direction ([Transform.ApplyDir]), with no
+// inverse transpose anywhere in the package.
+//
+// [Transform.Inverse] is EXACT — the transpose, never a solve — and that is a
+// claim about the arithmetic, not just the algebra. The transpose inverts a TRULY
+// orthonormal basis and nothing else: for a basis skewed by even 7e-10 it is an
+// approximation whose round trip drifts by about 1e-8. So the linear part of every
+// Transform is orthonormal to machine precision, not merely within the 1e-9
+// tolerance that ADMITS one. [FromBasis], the one door a stored-and-reloaded basis
+// comes in through, therefore orthonormalizes what it admits (Gram–Schmidt, as
+// [NewFrame] does for a Frame's axes) instead of storing it verbatim. Admission is
+// unchanged: a scale, a shear, a collapse are still rejected with
+// [ErrNotOrthonormal] rather than silently corrected into a transform the caller
+// never described. What is snapped straight is drift at the level of the tolerance
+// itself. Handedness survives — an improper basis (det = −1) comes back improper,
+// because all three vectors are orthonormalized in turn rather than the third being
+// re-derived as EX × EY, which would quietly flip a reflection into a rotation.
 //
 // Nothing non-finite may enter either type. A NaN or infinite angle, position,
 // origin or translation is rejected with [ErrNonFinite] — and so is a
@@ -59,7 +73,11 @@
 // vector by its own largest component would flush a small-but-decisive component
 // away, and a mirror plane at (MaxFloat64, 0, 1e-20) would then be reflected
 // across as if it passed through the origin — silently, since nothing about the
-// answer is infinite or NaN. These paths run once per frame or per feature, so the
+// answer is infinite or NaN. Where a whole vector must be scaled down for headroom
+// — [NewFrame]'s Gram–Schmidt subtraction, whose exact result can want a component
+// past MaxFloat64 — it is done only when the unscaled arithmetic actually
+// overflows, because scaling down unconditionally underflows a decisive denormal
+// and calls THAT degenerate. These paths run once per frame or per feature, so the
 // care costs nothing.
 //
 // The PER-POINT mappings are the accepted exception, and there are five of them:

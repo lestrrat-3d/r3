@@ -244,14 +244,19 @@ func TestTransformThen(t *testing.T) {
 	t.Run("rejects a composition whose linear part drifts out of tolerance", func(t *testing.T) {
 		t.Parallel()
 
-		// Orthonormality is judged with slack, and slack accumulates. A basis whose
-		// EX·EY is 7e-10 is INSIDE the 1e-9 tolerance, so FromBasis admits it and
-		// IsValid says yes. Composing it with itself doubles the error to 1.4e-9,
-		// which is outside. Then used to check only the translation and hand that
-		// back with a nil error: two valid transforms composing into an invalid one.
+		// Orthonormality is judged with slack, and slack composes. A linear part
+		// whose EX·EY is 7e-10 is INSIDE the 1e-9 tolerance and IsValid says yes;
+		// composed with itself the error doubles to 1.4e-9, which is outside. Then
+		// used to check only the translation and hand that back with a nil error: two
+		// valid transforms composing into an invalid one.
+		//
+		// No exported constructor produces such a transform any more — FromBasis, the
+		// one that used to, now orthonormalizes what it admits — so the skew is
+		// installed directly. The guard still has to hold: rounding accumulates over a
+		// long chain, and Then must judge the linear part it PRODUCES rather than
+		// trust the ones it was given.
 		b := r3.Basis{EX: r3.NewVec(1, 0, 0), EY: r3.NewVec(7e-10, 1, 0), EZ: r3.NewVec(0, 0, 1)}
-		a, err := r3.FromBasis(b, r3.Vec{})
-		require.NoError(t, err, "7e-10 is inside the orthonormality tolerance")
+		a := r3.TransformWithBasis(b, r3.Vec{})
 		require.True(t, a.IsValid(), "the transform being composed really is valid")
 		require.InDelta(t, 7e-10, a.Basis().EX.Dot(a.Basis().EY), 1e-20)
 
@@ -528,6 +533,116 @@ func TestBasisRoundTrip(t *testing.T) {
 		require.True(t, back.Equal(tr, tol))
 		require.Equal(t, tr.IsReflection(), back.IsReflection(), "handedness must survive")
 	}
+}
+
+func TestFromBasisOrthonormalizes(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a tolerance-level skew is snapped straight", func(t *testing.T) {
+		t.Parallel()
+
+		// The defect this exists for. EX·EY is 7e-10 — inside the 1e-9 tolerance, so
+		// the basis is ADMITTED — and FromBasis used to store it exactly as it
+		// arrived. But the transpose is the exact inverse of a TRULY orthonormal basis
+		// and of nothing else, so Inverse of that transform was not exact: the round
+		// trip of (10, 10, 0) came back at (10.000000007, …), a drift of ~1e-8, while
+		// doc.go and the README both promised "exact — the transpose, never a solve".
+		// Now the basis is orthonormalized on the way in.
+		b := r3.Basis{EX: r3.NewVec(1, 0, 0), EY: r3.NewVec(7e-10, 1, 0), EZ: r3.NewVec(0, 0, 1)}
+		tr, err := r3.FromBasis(b, r3.Vec{})
+		require.NoError(t, err, "7e-10 is inside the orthonormality tolerance: admitted, not refused")
+		require.True(t, tr.IsValid())
+
+		// Stored orthonormal to machine precision, not merely to the tolerance that
+		// let it in. 1e-9 slack would pass on the skewed basis too, and prove nothing.
+		got := tr.Basis()
+		require.InDelta(t, 0, got.EX.Dot(got.EY), 1e-15)
+		require.InDelta(t, 0, got.EY.Dot(got.EZ), 1e-15)
+		require.InDelta(t, 0, got.EZ.Dot(got.EX), 1e-15)
+		require.InDelta(t, 1, got.EX.Len(), 1e-15)
+		require.InDelta(t, 1, got.EY.Len(), 1e-15)
+		require.InDelta(t, 1, got.EZ.Len(), 1e-15)
+
+		// And so the inverse round-trips to machine precision. This is the whole
+		// point, so the bound is tight: at the old ~1e-8 drift it fails.
+		inv, err := tr.Inverse()
+		require.NoError(t, err)
+		p := r3.NewVec(10, 10, 0)
+		back := inv.Apply(tr.Apply(p))
+		require.True(t, back.Equal(p, 1e-14), "the inverse must be exact, not merely within tolerance")
+
+		// The corrected basis is still the basis the caller described, to within the
+		// skew that was corrected.
+		require.True(t, got.EX.Equal(b.EX, 1e-9))
+		require.True(t, got.EY.Equal(b.EY, 1e-9))
+		require.True(t, got.EZ.Equal(b.EZ, 1e-9))
+	})
+
+	t.Run("a genuinely non-orthonormal basis is still refused", func(t *testing.T) {
+		t.Parallel()
+
+		// Snapping a tolerance-level skew straight is not a licence to correct a basis
+		// that is simply wrong: a scale, a shear or a collapse must come back as an
+		// error, not as a silently different transform than the caller asked for.
+		// Validation runs FIRST, and only what it admits is orthonormalized.
+		for name, b := range map[string]r3.Basis{
+			"scaled":     {EX: axisX.Scale(2), EY: axisY, EZ: axisZ},
+			"sheared":    {EX: axisX, EY: r3.NewVec(1, 1, 0).Scale(1 / math.Sqrt2), EZ: axisZ},
+			"45° skew":   {EX: axisX, EY: r3.NewVec(1, 1, 0), EZ: axisZ},
+			"collapsed":  {EX: axisX, EY: axisX, EZ: axisZ},
+			"just over":  {EX: axisX, EY: r3.NewVec(1e-8, 1, 0), EZ: axisZ},
+			"zero value": {},
+		} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				tr, err := r3.FromBasis(b, r3.Vec{})
+				require.ErrorIs(t, err, r3.ErrNotOrthonormal)
+				require.Equal(t, r3.Transform{}, tr)
+			})
+		}
+	})
+
+	t.Run("handedness survives the orthonormalization", func(t *testing.T) {
+		t.Parallel()
+
+		// The easiest thing to get wrong. Gram–Schmidt on EX and EY alone, with
+		// EZ := EX × EY, is always RIGHT-handed: it would take an improper basis and
+		// hand back a proper one — a mirrored body silently un-mirrored — with no
+		// error and no way for the caller to notice. All three vectors go through the
+		// procedure instead, which preserves the sign of the determinant.
+		refl := r3.Basis{EX: axisX, EY: axisY, EZ: axisZ.Scale(-1)}
+		tr, err := r3.FromBasis(refl, r3.NewVec(1, 2, 3))
+		require.NoError(t, err)
+		require.True(t, tr.IsReflection(), "det = −1 in, det = −1 out")
+		require.True(t, tr.Basis().EZ.Equal(r3.NewVec(0, 0, -1), 1e-15))
+
+		// A reflection that is ALSO skewed within tolerance: it is corrected AND stays
+		// improper, and its inverse (itself, being an involution) is exact.
+		skewed := r3.Basis{EX: axisX, EY: r3.NewVec(7e-10, 1, 0), EZ: r3.NewVec(0, 0, -1)}
+		sk, err := r3.FromBasis(skewed, r3.Vec{})
+		require.NoError(t, err)
+		require.True(t, sk.IsReflection())
+		require.InDelta(t, 0, sk.Basis().EX.Dot(sk.Basis().EY), 1e-15)
+
+		inv, err := sk.Inverse()
+		require.NoError(t, err)
+		p := r3.NewVec(10, 10, 0)
+		require.True(t, inv.Apply(sk.Apply(p)).Equal(p, 1e-14))
+
+		// And a reflection built by the package survives the persistence round trip,
+		// which is what FromBasis is for.
+		xy, err := r3.NewFrame(r3.NewVec(0, 0, 5), axisX, axisY)
+		require.NoError(t, err)
+		mirror, err := r3.Reflection(xy)
+		require.NoError(t, err)
+		require.True(t, mirror.IsReflection())
+
+		back, err := r3.FromBasis(mirror.Basis(), mirror.Translation())
+		require.NoError(t, err)
+		require.True(t, back.IsReflection(), "handedness must survive persistence")
+		require.True(t, back.Equal(mirror, 1e-15))
+	})
 }
 
 func TestTransformValidity(t *testing.T) {
