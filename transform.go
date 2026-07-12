@@ -9,9 +9,12 @@ import (
 )
 
 // ErrDegenerateAxis is returned by [Rotation] and [RotationAround] when the
-// rotation axis is the zero vector: there is no rotation about a zero axis, and
-// inventing one would fabricate a direction that was never given.
-var ErrDegenerateAxis = errors.New("r3: degenerate rotation axis (zero vector)")
+// rotation axis has no direction to rotate about — the zero vector, or one with
+// a NaN or infinite component. Magnitude alone is never the problem: an axis of
+// any nonzero finite length, however small or large, names a direction and is
+// accepted. Inventing a direction for the inputs that don't would fabricate
+// geometry that was never given.
+var ErrDegenerateAxis = errors.New("r3: degenerate rotation axis (no direction)")
 
 // ErrNotOrthonormal is returned when the linear part of a Transform is not made
 // of unit-length, mutually orthogonal vectors, so it describes a scale, a shear
@@ -94,9 +97,14 @@ func Translation(v Vec) (Transform, error) {
 }
 
 // Rotation returns a right-handed rotation of angle about axis, through the
-// origin. The axis need not be unit length; it is normalized.
+// origin. The axis need not be unit length; only its direction is used, and the
+// direction is taken scale-free — an axis of (1e-20, 0, 0) IS the +X axis, and a
+// magnitude that would overflow or underflow ordinary normalization changes
+// nothing. Smallness is not degeneracy anywhere else in this package, and it is
+// not here.
 //
-// It returns [ErrDegenerateAxis] when axis is the zero vector, and wraps
+// It returns [ErrDegenerateAxis] when axis is the zero vector — the one input
+// with no direction at all — or a NaN/infinite one, and wraps
 // [units.ErrIncompatible] when angle does not measure an angle — which rejects a
 // length, a bare scalar, and the zero units.Value (whose kind is dimensionless,
 // not angle) alike. A forgotten angle is therefore an error rather than a silent
@@ -111,7 +119,10 @@ func Translation(v Vec) (Transform, error) {
 // To rotate about an axis that does not pass through the origin, use
 // [RotationAround].
 func Rotation(axis Vec, angle units.Value) (Transform, error) {
-	n, ok := axis.Normalize()
+	// direction, not Normalize: the axis is wanted only for its direction, and
+	// Normalize's zeroLen floor — a divide-by-zero guard sized for vectors of
+	// order one — would call a real 1e-20 axis "zero". Zero/NaN/Inf still reject.
+	n, ok := axis.direction()
 	if !ok {
 		return Transform{}, ErrDegenerateAxis
 	}

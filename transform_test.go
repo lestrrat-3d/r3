@@ -745,6 +745,27 @@ func TestTransformDegenerateInput(t *testing.T) {
 		require.True(t, huge.Equal(unit, 1e-12), "magnitude must not change the rotation")
 	})
 
+	t.Run("Rotation accepts a tiny but nonzero axis", func(t *testing.T) {
+		t.Parallel()
+
+		// (1e-20, 0, 0) IS the +X axis; smallness is not degeneracy. Normalize's
+		// zeroLen floor — a divide-by-zero guard sized for vectors of order one —
+		// would have called it "zero" and returned ErrDegenerateAxis for an axis
+		// with a perfectly good direction. The axis is taken scale-free instead.
+		tiny, err := r3.Rotation(r3.NewVec(1e-20, 0, 0), units.Degrees(90))
+		require.NoError(t, err)
+		require.True(t, tiny.IsValid())
+
+		unit, err := r3.Rotation(r3.NewVec(1, 0, 0), units.Degrees(90))
+		require.NoError(t, err)
+		require.True(t, tiny.Equal(unit, 1e-12), "magnitude must not change the rotation")
+
+		// All the way down: the smallest denormal still names +X.
+		denorm, err := r3.Rotation(r3.NewVec(math.SmallestNonzeroFloat64, 0, 0), units.Degrees(90))
+		require.NoError(t, err)
+		require.True(t, denorm.Equal(unit, 1e-12))
+	})
+
 	t.Run("Rotation rejects a value that is not an angle", func(t *testing.T) {
 		t.Parallel()
 
