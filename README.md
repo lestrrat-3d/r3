@@ -57,8 +57,10 @@ if err != nil {
 The package holds what *lives in* 3-space and what *acts on* it — vectors,
 frames, and the transforms between them. Nothing else. It carries no document
 state, and depends only on the standard library and
-[`lestrrat-3d/units`](https://github.com/lestrrat-3d/units), which is itself
-stdlib-only.
+[`lestrrat-3d/units`](https://github.com/lestrrat-3d/units), whose package code
+in turn imports only the standard library — so nothing outside stdlib enters a
+build of this package. (`units` requires testify to run its own tests; that is a
+test-only dependency and never reaches a build.)
 
 3D **shapes** (spheres, boxes, surfaces, solids) are deliberately **out of
 scope**. They belong to a geometry layer above, which imports this one for its

@@ -12,8 +12,11 @@
 // they belong to a geometry layer above, which imports this one for its
 // coordinates.
 //
-// It depends on the standard library and on github.com/lestrrat-3d/units, which
-// is itself stdlib-only. Angles are typed: see [Rotation].
+// It depends on the standard library and on github.com/lestrrat-3d/units, whose
+// package code in turn imports only the standard library — so nothing outside
+// stdlib enters a build of this package. (units requires testify to run its own
+// tests; that is a test-only dependency and never reaches a build.) Angles are
+// typed: see [Rotation].
 //
 // # Invariants
 //
