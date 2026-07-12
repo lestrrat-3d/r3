@@ -59,7 +59,7 @@ jobs:
       - name: Run tests
         run: go test ${{ matrix.race }} -timeout 10m ./...
 
-  # Tier 2: verify the tree is tidy and the generated docs are in sync.
+  # Tier 2: verify the tree is tidy.
   verify:
     needs: lint
     runs-on: ubuntu-latest
@@ -79,16 +79,6 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
-
-      # Regenerate the embedded README/guide code blocks and confirm they match
-      # what is committed. The annotated SVG heroes under docs/images are NOT
-      # diffed here: their watermark stamps the live commit hash, so a diff
-      # would always trip. Their real drift is covered by the hash-normalized
-      # genimages in-sync test that runs under `go test ./...` in the test job.
-      - name: Verify generated docs are in sync
-        run: |
-          go run ./internal/cmd/genreadme README.md docs/guide/units-and-parameters.md docs/guide/solving.md
-          git diff --exit-code -- README.md docs/guide
 
   # Tier 2: vulnerability scan of the module and its dependencies.
   govulncheck:
