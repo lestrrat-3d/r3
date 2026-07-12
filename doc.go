@@ -49,6 +49,21 @@
 // fallible, so all of them can say so. A Transform that exists is a real rigid
 // motion, with no asterisk.
 //
+// Bigness alone is not a fault, and the package goes out of its way not to treat
+// it as one: a vector whose length overflows still has a direction, and the cold
+// paths — [NewFrame]'s orthonormalization, [Reflection]'s plane offset — do their
+// arithmetic scaled, so an axis or a mirror plane out at MaxFloat64 is built
+// rather than refused. There is ONE accepted exception, on the hot path.
+// [Transform.ApplyDir] sums its three terms in a fixed order, so an intermediate
+// sum can overflow where the final value would not: transforms of points whose
+// coordinates approach MaxFloat64 may therefore be CONSERVATIVELY REJECTED with
+// [ErrNonFinite] — by [Transform.Then] or [Transform.Inverse] — even though the
+// exact result is representable. ApplyDir runs once per transformed point and
+// making it overflow-safe would tax every point transform forever to serve
+// coordinates that cannot exist (this library's unit is the millimetre; 1e308 mm
+// is some 1e289 light-years). The failure is one-sided: an error, never a wrong
+// answer, so the isometry invariant stands. See [Transform.ApplyDir].
+//
 // The price is that composing is fallible:
 //
 //	spin, err := r3.RotationAround(pivot, axis, units.Degrees(90)) // handle err

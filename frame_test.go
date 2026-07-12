@@ -28,12 +28,56 @@ func TestNewFrameOrthonormalizes(t *testing.T) {
 	require.InDelta(t, 1, f.N().Len(), 1e-12)
 }
 
+func TestNewFrameHugeAxes(t *testing.T) {
+	t.Parallel()
+
+	// Two finite axes, plainly NOT collinear: (1, 1, 1) and (1, 1, −1) in
+	// direction, merely written at the top of the float64 range. The Gram–Schmidt
+	// projection v·û used to overflow on the way to a result that cancels back
+	// down — ⅔·Max + ⅔·Max is +Inf before the −⅓·Max that would have brought it
+	// home — so the perpendicular came out NaN, Normalize refused it, and NewFrame
+	// reported "zero or collinear axes" about axes that are neither. Magnitude is
+	// not degeneracy.
+	const max = math.MaxFloat64
+	f, err := r3.NewFrame(r3.Vec{}, r3.NewVec(max, max, max), r3.NewVec(max, max, -max))
+	require.NoError(t, err)
+	require.True(t, f.IsValid())
+	require.InDelta(t, 1, f.U().Len(), 1e-12)
+	require.InDelta(t, 1, f.V().Len(), 1e-12)
+	require.InDelta(t, 0, f.U().Dot(f.V()), 1e-12, "the axes must come back orthogonal")
+	require.InDelta(t, 1, f.N().Len(), 1e-12)
+
+	// Right-handed, as every Frame is: its transform is proper, not a reflection.
+	tr, err := r3.FromFrame(f)
+	require.NoError(t, err)
+	require.False(t, tr.IsReflection())
+
+	// And it is the very frame the same directions give at ordinary magnitudes:
+	// only the size differed.
+	small := mkFrame(t, r3.Vec{}, r3.NewVec(1, 1, 1), r3.NewVec(1, 1, -1))
+	require.True(t, f.Equal(small, 1e-12), "magnitude must not change the frame")
+}
+
 func TestNewFrameDegenerate(t *testing.T) {
 	_, err := r3.NewFrame(r3.Vec{}, r3.Vec{}, r3.NewVec(0, 1, 0))
 	require.ErrorIs(t, err, r3.ErrDegenerateFrame)
 	// Collinear axes: v parallel to u leaves no perpendicular component.
 	_, err = r3.NewFrame(r3.Vec{}, r3.NewVec(1, 0, 0), r3.NewVec(2, 0, 0))
 	require.ErrorIs(t, err, r3.ErrDegenerateFrame)
+
+	// A zero v is degenerate however large u is.
+	_, err = r3.NewFrame(r3.Vec{}, r3.NewVec(math.MaxFloat64, math.MaxFloat64, 0), r3.Vec{})
+	require.ErrorIs(t, err, r3.ErrDegenerateFrame)
+
+	// Collinear axes stay degenerate at the top of the range too: making the
+	// projection overflow-safe must not launder a genuinely vanishing
+	// perpendicular into a direction.
+	_, err = r3.NewFrame(
+		r3.Vec{},
+		r3.NewVec(math.MaxFloat64, math.MaxFloat64, math.MaxFloat64),
+		r3.NewVec(math.MaxFloat64/2, math.MaxFloat64/2, math.MaxFloat64/2),
+	)
+	require.ErrorIs(t, err, r3.ErrDegenerateFrame, "collinear is collinear at any magnitude")
 }
 
 func TestNewFrameNonFinite(t *testing.T) {

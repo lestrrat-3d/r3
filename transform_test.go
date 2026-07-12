@@ -182,6 +182,36 @@ func TestTransformThen(t *testing.T) {
 		require.Equal(t, r3.Transform{}, inv)
 	})
 
+	t.Run("conservatively rejects an inverse whose intermediate sum overflows", func(t *testing.T) {
+		t.Parallel()
+
+		// The ACCEPTED limit, pinned so the documented contract is enforced and not
+		// merely described. ApplyDir sums ex·x + ey·y + ez·z in a fixed order, so a
+		// partial sum can overflow where the total would not: this basis has the row
+		// (⅔, ⅔, −⅓), and against a translation of (Max, Max, Max) that is
+		// ⅔·Max + ⅔·Max = +Inf before the −⅓·Max that would have brought it back to
+		// exactly Max. The true inverse translation, (−Max, −Max, −Max), is
+		// perfectly representable; r3 declines to compute it.
+		//
+		// This is deliberate — ApplyDir runs once per transformed point, and the
+		// package will not tax every point transform to serve coordinates 1e289
+		// light-years out (see its doc comment). What matters is that the failure is
+		// CONSERVATIVE: an error, never a wrong transform. So assert the error.
+		const max = math.MaxFloat64
+		b := r3.Basis{
+			EX: r3.NewVec(2, 2, -1).Scale(1.0 / 3.0),
+			EY: r3.NewVec(2, -1, 2).Scale(1.0 / 3.0),
+			EZ: r3.NewVec(-1, 2, 2).Scale(1.0 / 3.0),
+		}
+		tr, err := r3.FromBasis(b, r3.NewVec(max, max, max))
+		require.NoError(t, err, "the basis is orthonormal and the translation finite")
+		require.True(t, tr.IsValid())
+
+		inv, err := tr.Inverse()
+		require.ErrorIs(t, err, r3.ErrNonFinite, "the conservative rejection, not a wrong answer")
+		require.Equal(t, r3.Transform{}, inv)
+	})
+
 	t.Run("rejects a composition whose linear part drifts out of tolerance", func(t *testing.T) {
 		t.Parallel()
 
@@ -333,6 +363,34 @@ func TestReflection(t *testing.T) {
 		twice, err := tr.Then(tr)
 		require.NoError(t, err)
 		require.True(t, twice.Equal(r3.Identity(), tol))
+	})
+
+	t.Run("an enormously distant plane whose offset is finite", func(t *testing.T) {
+		t.Parallel()
+
+		// The plane through (Max, Max, −Max) with normal (1, 1, 1)/√3. Its offset,
+		// 2(origin·n)n, is about ⅔·Max in each component — an ordinary finite
+		// number — but origin·n overflows on the way and the doubling overflows
+		// again, so Reflection used to reject a perfectly good mirror plane with
+		// ErrNonFinite. The dot is now taken in a scaled binade and only the result
+		// is scaled back, so what gets rejected is an offset that really is
+		// unrepresentable, not one that merely passed near the ceiling.
+		const max = math.MaxFloat64
+		// u ⊥ (1,1,1) and u × v ∝ (1,1,1), so N is (1, 1, 1)/√3.
+		far, err := r3.NewFrame(r3.NewVec(max, max, -max), r3.NewVec(1, -1, 0), r3.NewVec(1, 1, -2))
+		require.NoError(t, err)
+		require.True(t, far.IsValid())
+		require.True(t, far.N().Equal(r3.NewVec(1, 1, 1).Scale(1/math.Sqrt(3)), tol))
+
+		tr, err := r3.Reflection(far)
+		require.NoError(t, err)
+		require.True(t, tr.IsValid())
+		require.True(t, tr.IsReflection())
+
+		want := 2.0 / 3.0 * max
+		require.InDelta(t, want, tr.Translation().X, 1e295)
+		require.InDelta(t, want, tr.Translation().Y, 1e295)
+		require.InDelta(t, want, tr.Translation().Z, 1e295)
 	})
 
 	t.Run("fixes points on the mirror plane", func(t *testing.T) {

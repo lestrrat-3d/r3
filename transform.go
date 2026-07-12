@@ -182,6 +182,14 @@ func RotationAround(center, axis Vec, angle units.Value) (Transform, error) {
 // so a plane a finite but enormous distance along its own normal (past
 // MaxFloat64/2) doubles to +Inf. What is validated here is therefore the RESULT:
 // a Transform that exists is a real rigid motion, with no asterisk.
+//
+// That rejection is reserved for an offset that is genuinely unrepresentable, not
+// for one that merely passes near the ceiling on its way to an ordinary value.
+// The dot product is taken on the origin scaled down by a power of two and the
+// translation is scaled back only at the end, so a mirror plane through
+// (MaxFloat64, MaxFloat64, −MaxFloat64) with normal (1, 1, 1)/√3 — whose offset
+// components are about ⅔·MaxFloat64, comfortably finite — is built, where the
+// naive 2(origin·n) overflowed inside the dot and the plane was refused.
 func Reflection(mirror Frame) (Transform, error) {
 	// Checked ahead of IsValid — which would also reject it — so that a plane
 	// anchored nowhere is reported as the non-finite position it is, and not as a
@@ -196,7 +204,16 @@ func Reflection(mirror Frame) (Transform, error) {
 	n := mirror.N()
 	// Offset the plane from the origin: a point at distance d along n lands at
 	// −d, so the whole reflection shifts by 2(origin·n)n.
-	t := n.Scale(2 * mirror.Origin().Dot(n))
+	//
+	// Computed in a scaled binade: with o = origin·2⁻ᵉ, the offset is
+	// 2(o·n)n·2ᵉ, and o·n is bounded by √3 whatever the origin was, so neither the
+	// dot nor the doubling can overflow. Only the final 2ᵉ can — precisely when the
+	// offset really is past MaxFloat64, which is the case worth an error. A zero
+	// origin has no scaling (and needs none): its offset is zero.
+	var t Vec
+	if o, e, ok := mirror.Origin().scaledDown(); ok {
+		t = n.Scale(2 * o.Dot(n)).ldexp(e)
+	}
 	if !t.isFinite() {
 		return Transform{}, ErrNonFinite
 	}
@@ -276,6 +293,30 @@ func (t Transform) Apply(p Vec) Vec {
 // needed. That is a dividend of excluding scale: under a general affine map a
 // normal needs the inverse transpose, and everyone forgets. Here it cannot be
 // got wrong.
+//
+// # Accepted limit: coordinates near MaxFloat64
+//
+// The three terms ex·x + ey·y + ez·z are summed in a fixed order, so a partial
+// sum can overflow to ±Inf even when the final result would be finite: with a
+// basis row of (⅔, ⅔, −⅓) and a d whose components are near [math.MaxFloat64],
+// ⅔·Max + ⅔·Max is +Inf before the −⅓·Max that would have brought it back to
+// Max. Such a d comes back non-finite, and the fallible callers that compute with
+// it — [Transform.Then] and [Transform.Inverse] — then return [ErrNonFinite] for
+// a composition whose true value was perfectly representable.
+//
+// This is deliberate, and it is the one place in the package where it is. ApplyDir
+// runs once per transformed point and is the hottest function here; overflow-safe
+// accumulation would tax every point transform forever to serve coordinates that
+// cannot occur. The unit of this library is the millimetre, and 1e308 mm is some
+// 1e289 light-years — there is no model, no scene and no tolerance stack anywhere
+// near it. The cold paths, called once per frame or per feature, do pay that cost:
+// [NewFrame] and [Reflection] scale their arithmetic and accept such input.
+//
+// The failure is conservative, which is what makes it acceptable rather than
+// merely cheap. ApplyDir does not return a wrong direction; the overflow becomes
+// an ±Inf that the [Transform] invariant catches, so the caller gets an error and
+// never a lie. A rejected transform is a nuisance; a silently wrong isometry is a
+// defect.
 func (t Transform) ApplyDir(d Vec) Vec {
 	return t.ex.Scale(d.X).
 		Add(t.ey.Scale(d.Y)).
@@ -297,6 +338,12 @@ func (t Transform) ApplyDir(d Vec) Vec {
 // It returns [ErrNonFinite] when the composed translation overflows, which two
 // individually valid transforms can do: translating by MaxFloat64 along X, then
 // again by MaxFloat64 along X, lands at +Inf.
+//
+// It also returns [ErrNonFinite] in the narrower case where the composed
+// translation is mathematically finite but a partial sum inside [Transform.ApplyDir]
+// overflowed on the way to it — coordinates within a factor of a few of
+// MaxFloat64. That conservative rejection is an accepted limit of the hot path,
+// not an oversight; see [Transform.ApplyDir] for why it is not bought off.
 //
 // It returns [ErrNotOrthonormal] when the composed linear part is not orthonormal
 // within tolerance. This is NOT an overflow — the images of unit vectors under an
@@ -348,7 +395,10 @@ func (t Transform) validate() error {
 // is not the same as safety: the inverse translation is −Lᵀ·t, and each of those
 // three dot products sums three products, so a huge-but-finite translation in a
 // rotated basis can carry a component past MaxFloat64 even though t itself was
-// perfectly valid.
+// perfectly valid. It returns the same error, conservatively, when only an
+// INTERMEDIATE sum inside [Transform.ApplyDir] overflows and the true inverse
+// translation would have been finite — the accepted hot-path limit documented on
+// [Transform.ApplyDir]. Either way the answer is an error, never a wrong transform.
 //
 // It returns [ErrNotOrthonormal] when the transposed linear part is not
 // orthonormal — which is exactly when t's own was not, the zero value Transform{}

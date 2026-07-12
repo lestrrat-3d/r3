@@ -38,6 +38,16 @@ type Frame struct {
 // [ErrDegenerateFrame] because the axes are fine; it is the position that is
 // not a position. ErrDegenerateFrame stays reserved for what it says: zero or
 // collinear AXES.
+//
+// Axis MAGNITUDE is not a reason for refusal, however large. The projection is
+// taken on v scaled down by a power of two, so that a v whose own dot product
+// would overflow — u = (MaxFloat64, MaxFloat64, MaxFloat64) with
+// v = (MaxFloat64, MaxFloat64, −MaxFloat64), two finite axes that are plainly not
+// collinear — still yields the perpendicular it has. The naive projection
+// overflows on the way to a result that cancels back down to an ordinary number,
+// and NewFrame then reported "degenerate axes" about axes that were nothing of
+// the kind. The scaling is exact and the direction of the perpendicular is
+// scale-invariant, so nothing is paid for it.
 func NewFrame(origin, u, v Vec) (Frame, error) {
 	if !origin.isFinite() {
 		return Frame{}, ErrNonFinite
@@ -46,8 +56,19 @@ func NewFrame(origin, u, v Vec) (Frame, error) {
 	if !ok {
 		return Frame{}, ErrDegenerateFrame
 	}
+	// Scale v into the binade below 1 first: v·un can overflow to ±Inf while the
+	// perpendicular it feeds is perfectly finite, and an overflow here is
+	// indistinguishable from a vanishing perpendicular — a false "degenerate".
+	// Scaling by a power of two is bit-exact, and it never needs undoing: the
+	// perpendicular is normalized, and direction does not care about scale. A
+	// zero, NaN or infinite v has no scaling and no direction either, which is the
+	// degenerate case Normalize would have caught anyway.
+	vs, _, ok := v.scaledDown()
+	if !ok {
+		return Frame{}, ErrDegenerateFrame
+	}
 	// Remove the u-component of v, leaving the in-plane perpendicular.
-	vp := v.Sub(un.Scale(v.Dot(un)))
+	vp := vs.Sub(un.Scale(vs.Dot(un)))
 	vn, ok := vp.Normalize()
 	if !ok {
 		return Frame{}, ErrDegenerateFrame

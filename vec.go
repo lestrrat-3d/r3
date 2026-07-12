@@ -82,6 +82,49 @@ func (v Vec) Len() float64 { return math.Hypot(math.Hypot(v.X, v.Y), v.Z) }
 // component does not, and no rigid motion can be built from it.
 func (v Vec) isFinite() bool { return isFinite(v.X) && isFinite(v.Y) && isFinite(v.Z) }
 
+// scaledDown returns v scaled by the exact power of two 2⁻ᵉ that brings v's
+// largest absolute component into [0.5, 1), together with that exponent e. It
+// returns false when there is no such scaling: v is the zero vector, or some
+// component is NaN or infinite.
+//
+// It is how the package takes a dot product against a vector whose components
+// are enormous without overflowing on the way there: scale down, compute in the
+// scaled binade, scale the RESULT back with [Vec.ldexp]. Scaling by a power of
+// two shifts the exponent of every component and touches no mantissa bit, so the
+// arithmetic done on the scaled vector is bit for bit what it would have been on
+// the original — minus the overflow. What is left is one honest failure mode: the
+// scale-back itself can overflow, and it does so exactly when the true result is
+// too large to name, which is a result worth rejecting.
+//
+// The guard is phrased positively (0 < m <= MaxFloat64, an ACCEPT test) so that a
+// NaN component — which makes m NaN, and every comparison against NaN is false —
+// fails it rather than sails through it.
+func (v Vec) scaledDown() (Vec, int, bool) {
+	m := math.Max(math.Abs(v.X), math.Max(math.Abs(v.Y), math.Abs(v.Z)))
+	if !(m > 0 && m <= math.MaxFloat64) {
+		return Vec{}, 0, false
+	}
+	_, e := math.Frexp(m)
+	return Vec{
+		X: math.Ldexp(v.X, -e),
+		Y: math.Ldexp(v.Y, -e),
+		Z: math.Ldexp(v.Z, -e),
+	}, e, true
+}
+
+// ldexp returns v with every component multiplied by 2ᵉ. It undoes the scaling
+// [Vec.scaledDown] applied, and like it, it is exact — except for the one
+// overflow to ±Inf that is the caller's business to detect, since a component
+// past MaxFloat64 here is a genuinely unrepresentable result and not an artefact
+// of the order of operations.
+func (v Vec) ldexp(e int) Vec {
+	return Vec{
+		X: math.Ldexp(v.X, e),
+		Y: math.Ldexp(v.Y, e),
+		Z: math.Ldexp(v.Z, e),
+	}
+}
+
 // Equal reports whether v and o agree componentwise within tol. It is a
 // tolerant comparison for floating-point results, not an exact one: two vectors
 // that should be equal rarely are, bit for bit, once any arithmetic has touched

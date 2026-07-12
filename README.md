@@ -93,6 +93,17 @@ it *is* a shape, it does not.
   `Transform` that exists is a real rigid motion, no asterisk. Composition being
   fallible is the bill for that; an always-nil `err` is a small tax, a silently
   infinite placement is not.
+- **Bigness is not a fault — with one accepted exception.** Huge-but-finite input
+  is *built*, not refused: `NewFrame` orthonormalizes axes out at `MaxFloat64`,
+  and `Reflection` offsets a mirror plane that far out, by scaling their
+  arithmetic. Those are cold paths. `ApplyDir` is not — it runs once per
+  transformed point — so it sums its three terms in fixed order, and an
+  intermediate sum can overflow where the final value would not. **Transforms of
+  points whose coordinates approach `MaxFloat64` may therefore be conservatively
+  rejected** with `ErrNonFinite` by `Then` or `Inverse`, even when the exact
+  result is representable. That is deliberate: the unit here is the millimetre,
+  and `1e308` mm is ~`1e289` light-years. The failure is one-sided — an error,
+  never a wrong answer.
 - **`Transform.Inverse` is exact** — the transpose of an orthogonal matrix, never
   a solve. Admitting scale would cost this.
 - **A normal transforms like a direction** (`ApplyDir`). No inverse transpose,
