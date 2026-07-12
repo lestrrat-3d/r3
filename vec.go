@@ -82,47 +82,75 @@ func (v Vec) Len() float64 { return math.Hypot(math.Hypot(v.X, v.Y), v.Z) }
 // component does not, and no rigid motion can be built from it.
 func (v Vec) isFinite() bool { return isFinite(v.X) && isFinite(v.Y) && isFinite(v.Z) }
 
-// scaledDown returns v scaled by the exact power of two 2⁻ᵉ that brings v's
-// largest absolute component into [0.5, 1), together with that exponent e. It
-// returns false when there is no such scaling: v is the zero vector, or some
-// component is NaN or infinite.
+// dotUnit returns v · u, where u MUST be a unit vector. That precondition is not
+// a formality: it is the whole reason the result cannot be got wrong by
+// overflowing on the way to it.
 //
-// It is how the package takes a dot product against a vector whose components
-// are enormous without overflowing on the way there: scale down, compute in the
-// scaled binade, scale the RESULT back with [Vec.ldexp]. Scaling by a power of
-// two shifts the exponent of every component and touches no mantissa bit, so the
-// arithmetic done on the scaled vector is bit for bit what it would have been on
-// the original — minus the overflow. What is left is one honest failure mode: the
-// scale-back itself can overflow, and it does so exactly when the true result is
-// too large to name, which is a result worth rejecting.
+// Because every component of a unit vector obeys |uᵢ| <= 1, every product vᵢ·uᵢ
+// obeys |vᵢ·uᵢ| <= |vᵢ| <= MaxFloat64 — so the PRODUCTS can never overflow, only
+// their sum can (it can reach 3·MaxFloat64). The ordinary [Vec.Dot] sums them in
+// a fixed order and so can hit ±Inf mid-way to a result that was perfectly
+// representable, which the cold paths ([NewFrame], [Reflection]) must not accept:
+// there, an overflow is indistinguishable from a vanishing perpendicular or a
+// vanishing plane offset, and the caller is told "degenerate" about geometry that
+// was nothing of the kind.
+//
+// So: sum directly, and only if that sum is not finite, redo it with each product
+// scaled by the exact power of two ¼, which bounds the sum by ¾·MaxFloat64, and
+// scale the sum back by 4. Scaling by a power of two moves no mantissa bit, so the
+// detour is exact; and it scales the PRODUCTS, never v itself — scaling v by its
+// own largest component would annihilate a small-but-decisive component (a plane
+// at (MaxFloat64, 0, 1e-20) has offset 1e-20, and the offset is what is being
+// asked for). Only the scale-back can overflow, and it does so exactly when the
+// true dot product is past MaxFloat64 — a result worth reporting as ±Inf, which
+// the callers' finiteness guards then reject.
+//
+// A NaN or infinite component of v propagates into the result, as it should.
+func (v Vec) dotUnit(u Vec) float64 {
+	px, py, pz := v.X*u.X, v.Y*u.Y, v.Z*u.Z
+	// Phrased positively (an ACCEPT test) so that a NaN — false against every
+	// bound whichever way the test is written — takes the same path as an
+	// overflow rather than sailing through.
+	if s := px + py + pz; isFinite(s) {
+		return s
+	}
+	return ((px * 0.25) + (py * 0.25) + (pz * 0.25)) * 4
+}
+
+// direction returns the unit vector along v and true, or false when v has no
+// direction at all: v is exactly zero, or some component is NaN or infinite. It
+// is [Vec.Normalize] without the zeroLen floor — the magnitude is stripped by an
+// exact power-of-two scaling first, so the direction of a vector is recovered
+// wherever in the float64 range that vector lives, from MaxFloat64 down to the
+// denormals.
+//
+// That is exactly what the floor is FOR, so this is not a drop-in replacement:
+// Normalize's floor protects a CALLER who asks for the direction of what may be
+// noise. direction is for the one place inside the package that has already
+// established its vector is not noise — [NewFrame]'s in-plane perpendicular,
+// whose scale is set by axes the caller chose and can legitimately be 1e-20 (from
+// u = (1, 0, 0), v = (MaxFloat64, 1e-20, 0)) without being any less of a
+// direction. NewFrame checks the result is genuinely orthogonal to u, which is
+// what rules out the noise this helper would otherwise happily normalize.
 //
 // The guard is phrased positively (0 < m <= MaxFloat64, an ACCEPT test) so that a
 // NaN component — which makes m NaN, and every comparison against NaN is false —
 // fails it rather than sails through it.
-func (v Vec) scaledDown() (Vec, int, bool) {
+func (v Vec) direction() (Vec, bool) {
 	m := math.Max(math.Abs(v.X), math.Max(math.Abs(v.Y), math.Abs(v.Z)))
 	if !(m > 0 && m <= math.MaxFloat64) {
-		return Vec{}, 0, false
+		return Vec{}, false
 	}
+	// Scale the largest component into [0.5, 1) — exactly, by shifting exponents,
+	// so no mantissa bit moves. The scaled length then lies in [0.5, √3]: it can
+	// neither overflow nor underflow, whatever v was.
 	_, e := math.Frexp(m)
-	return Vec{
+	s := Vec{
 		X: math.Ldexp(v.X, -e),
 		Y: math.Ldexp(v.Y, -e),
 		Z: math.Ldexp(v.Z, -e),
-	}, e, true
-}
-
-// ldexp returns v with every component multiplied by 2ᵉ. It undoes the scaling
-// [Vec.scaledDown] applied, and like it, it is exact — except for the one
-// overflow to ±Inf that is the caller's business to detect, since a component
-// past MaxFloat64 here is a genuinely unrepresentable result and not an artefact
-// of the order of operations.
-func (v Vec) ldexp(e int) Vec {
-	return Vec{
-		X: math.Ldexp(v.X, e),
-		Y: math.Ldexp(v.Y, e),
-		Z: math.Ldexp(v.Z, e),
 	}
+	return s.Scale(1 / s.Len()), true
 }
 
 // Equal reports whether v and o agree componentwise within tol. It is a
@@ -175,12 +203,9 @@ func (v Vec) Normalize() (Vec, bool) {
 	if l <= math.MaxFloat64 {
 		return v.Scale(1 / l), true
 	}
-	// The length overflowed even though v did not. Divide by the largest absolute
-	// component — an exact-magnitude scaling that maps the largest component to
-	// ±1, so the scaled length lies in [1, √3] and cannot overflow — then
-	// normalize that. The result is the direction of v, which is what was asked
-	// for; only its (unrepresentable) length is lost.
-	m := math.Max(math.Abs(v.X), math.Max(math.Abs(v.Y), math.Abs(v.Z)))
-	s := Vec{X: v.X / m, Y: v.Y / m, Z: v.Z / m}
-	return s.Scale(1 / s.Len()), true
+	// The length overflowed even though v did not. Strip the magnitude first — an
+	// exact power-of-two scaling that leaves a vector whose length cannot overflow
+	// — and normalize that. The result is the direction of v, which is what was
+	// asked for; only its (unrepresentable) length is lost.
+	return v.direction()
 }

@@ -12,11 +12,12 @@
 // they belong to a geometry layer above, which imports this one for its
 // coordinates.
 //
-// It depends on the standard library and on github.com/lestrrat-3d/units, whose
-// package code in turn imports only the standard library — so nothing outside
-// stdlib enters a build of this package. (units requires testify to run its own
-// tests; that is a test-only dependency and never reaches a build.) Angles are
-// typed: see [Rotation].
+// github.com/lestrrat-3d/units is the ONLY non-stdlib dependency a build of this
+// package pulls in (it is what `go list -deps .` reports beyond the standard
+// library), and it is a shallow one: the package code of units imports nothing
+// but the standard library itself, so the build graph stops there. (units
+// requires testify to run its own tests; that is a test-only dependency of units
+// and never reaches a build.) Angles are typed: see [Rotation].
 //
 // # Invariants
 //
@@ -49,12 +50,17 @@
 // fallible, so all of them can say so. A Transform that exists is a real rigid
 // motion, with no asterisk.
 //
-// Bigness alone is not a fault, and the package goes out of its way not to treat
-// it as one: a vector whose length overflows still has a direction, and the COLD
-// paths — [NewFrame]'s orthonormalization, [Reflection]'s plane offset — do their
-// arithmetic scaled, so an axis or a mirror plane out at MaxFloat64 is built
-// rather than refused. They are called once per frame or per feature, so the cost
-// is nothing.
+// Bigness alone is not a fault, and neither is smallness beside it; the package
+// goes out of its way to treat neither as one. A vector whose length overflows
+// still has a direction, and the COLD paths — [NewFrame]'s orthonormalization,
+// [Reflection]'s plane offset — do their arithmetic scaled, so an axis or a mirror
+// plane out at MaxFloat64 is built rather than refused. The scaling is applied to
+// the PRODUCTS of a dot product, never to the vector going into it: scaling the
+// vector by its own largest component would flush a small-but-decisive component
+// away, and a mirror plane at (MaxFloat64, 0, 1e-20) would then be reflected
+// across as if it passed through the origin — silently, since nothing about the
+// answer is infinite or NaN. These paths run once per frame or per feature, so the
+// care costs nothing.
 //
 // The PER-POINT mappings are the accepted exception, and there are five of them:
 // [Transform.Apply], [Transform.ApplyDir], [Frame.ToWorld], [Frame.ToWorldUV] and

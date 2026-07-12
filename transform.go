@@ -185,11 +185,21 @@ func RotationAround(center, axis Vec, angle units.Value) (Transform, error) {
 //
 // That rejection is reserved for an offset that is genuinely unrepresentable, not
 // for one that merely passes near the ceiling on its way to an ordinary value.
-// The dot product is taken on the origin scaled down by a power of two and the
-// translation is scaled back only at the end, so a mirror plane through
-// (MaxFloat64, MaxFloat64, −MaxFloat64) with normal (1, 1, 1)/√3 — whose offset
-// components are about ⅔·MaxFloat64, comfortably finite — is built, where the
-// naive 2(origin·n) overflowed inside the dot and the plane was refused.
+// The dot product goes through [Vec.dotUnit], which scales the three PRODUCTS by
+// a power of two — never the origin — so both extremes come out right:
+//
+//   - a plane through (MaxFloat64, MaxFloat64, −MaxFloat64) with normal (1, 1, 1)/√3,
+//     whose offset components are about ⅔·MaxFloat64 and so comfortably finite, is
+//     built. The naive 2(origin·n) overflowed inside the dot and the plane was
+//     refused.
+//   - a plane through (MaxFloat64, 0, 1e-20) with normal (0, 0, 1), whose offset is
+//     the tiny 2e-20, keeps it. Scaling the ORIGIN by its largest component — as
+//     this once did — would have flushed the 1e-20 to zero and reflected across the
+//     wrong plane, silently: no error, no infinity, just a mirror through the origin
+//     that no longer fixes the points lying on it.
+//
+// The doubling is applied after the normal is scaled, component by component, so
+// it overflows only when a component of the offset itself is past MaxFloat64.
 func Reflection(mirror Frame) (Transform, error) {
 	// Checked ahead of IsValid — which would also reject it — so that a plane
 	// anchored nowhere is reported as the non-finite position it is, and not as a
@@ -205,15 +215,12 @@ func Reflection(mirror Frame) (Transform, error) {
 	// Offset the plane from the origin: a point at distance d along n lands at
 	// −d, so the whole reflection shifts by 2(origin·n)n.
 	//
-	// Computed in a scaled binade: with o = origin·2⁻ᵉ, the offset is
-	// 2(o·n)n·2ᵉ, and o·n is bounded by √3 whatever the origin was, so neither the
-	// dot nor the doubling can overflow. Only the final 2ᵉ can — precisely when the
-	// offset really is past MaxFloat64, which is the case worth an error. A zero
-	// origin has no scaling (and needs none): its offset is zero.
-	var t Vec
-	if o, e, ok := mirror.Origin().scaledDown(); ok {
-		t = n.Scale(2 * o.Dot(n)).ldexp(e)
-	}
+	// dotUnit gives d = origin·n without an overflow inside the sum (n is a unit
+	// vector, so the products cannot overflow at all). The doubling comes LAST,
+	// after d is spread over n's components — 2·d can be +Inf while every 2·d·nᵢ
+	// is finite. What is left is the honest overflow: an offset component past
+	// MaxFloat64 comes back ±Inf and is rejected below.
+	t := n.Scale(mirror.Origin().dotUnit(n)).Scale(2)
 	if !t.isFinite() {
 		return Transform{}, ErrNonFinite
 	}
@@ -282,6 +289,14 @@ func FromBasis(b Basis, t Vec) (Transform, error) {
 //
 // Use [Transform.ApplyDir] for a direction or a normal. The distinction is not
 // sugar — applying Apply to a normal translates it, which is silently wrong.
+//
+// It shares the package's accepted per-point limit: the terms are summed in a
+// fixed order, so a point near [math.MaxFloat64] can drive an intermediate sum to
+// ±Inf even when the exact result is representable. Apply is infallible and has no
+// error to return, so it hands back a Vec with a non-finite COMPONENT rather than
+// refusing — a wrong answer, not a refusal, and a caller working at those
+// magnitudes must check the returned Vec itself. See [Transform.ApplyDir] for why
+// the hot path is not bought off.
 func (t Transform) Apply(p Vec) Vec {
 	return t.ApplyDir(p).Add(t.t)
 }

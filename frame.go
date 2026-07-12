@@ -28,8 +28,13 @@ type Frame struct {
 // NewFrame returns an orthonormal right-handed frame at origin whose first axis
 // is along u and whose second axis lies in the u–v plane. The axes are
 // orthonormalized with Gram–Schmidt (u is kept; v is made perpendicular to u;
-// both are normalized). It returns [ErrDegenerateFrame] when u is zero or when
-// v is collinear with u (the perpendicular component vanishes).
+// both are normalized). It returns [ErrDegenerateFrame] when u is zero or when v
+// is collinear with u — either because the perpendicular component vanishes
+// outright, or because the subtraction that computes it cancels down to rounding
+// noise, which is collinearity as far as float64 can tell. Collinearity is judged
+// by what comes out: the perpendicular must actually BE perpendicular to u, to the
+// same tolerance [Frame.IsValid] applies, so a frame returned by NewFrame always
+// passes IsValid.
 //
 // It returns [ErrNonFinite] when origin has a NaN or infinite component: the
 // origin is stored as given, not normalized, so nothing downstream would ever
@@ -39,15 +44,28 @@ type Frame struct {
 // not a position. ErrDegenerateFrame stays reserved for what it says: zero or
 // collinear AXES.
 //
-// Axis MAGNITUDE is not a reason for refusal, however large. The projection is
-// taken on v scaled down by a power of two, so that a v whose own dot product
-// would overflow — u = (MaxFloat64, MaxFloat64, MaxFloat64) with
-// v = (MaxFloat64, MaxFloat64, −MaxFloat64), two finite axes that are plainly not
-// collinear — still yields the perpendicular it has. The naive projection
-// overflows on the way to a result that cancels back down to an ordinary number,
-// and NewFrame then reported "degenerate axes" about axes that were nothing of
-// the kind. The scaling is exact and the direction of the perpendicular is
-// scale-invariant, so nothing is paid for it.
+// Axis MAGNITUDE is not a reason for refusal, however large, and neither is a
+// wide dynamic range WITHIN an axis. Two things make that so, and both are exact
+// powers of two, so neither costs a mantissa bit:
+//
+//   - The projection v·un is taken with [Vec.dotUnit], which scales the three
+//     PRODUCTS rather than v, so the perpendicular of u = (1, 0, 0) with
+//     v = (MaxFloat64, 1e-20, 0) — finite, plainly not collinear — is the 1e-20
+//     it actually is, not the zero that scaling v by its own largest component
+//     would have made of it.
+//   - v is then quartered before the projection is subtracted off. The true
+//     perpendicular of two finite axes can have components past MaxFloat64
+//     (u = (MaxFloat64, MaxFloat64, MaxFloat64) with
+//     v = (MaxFloat64, MaxFloat64, −MaxFloat64) is such a pair), so the subtraction
+//     is done a quarter of the way down, where it cannot overflow. Only the
+//     DIRECTION of the perpendicular is wanted, and direction is scale-invariant,
+//     so the quarter is never undone. For the same reason the perpendicular is
+//     normalized scale-free (see [Vec.direction]) rather than through
+//     [Vec.Normalize], whose zeroLen floor is sized for vectors of order one and
+//     would call a legitimate 1e-20 perpendicular "degenerate" for being small.
+//
+// Without all three, NewFrame reported "degenerate axes" about axes that were
+// nothing of the kind.
 func NewFrame(origin, u, v Vec) (Frame, error) {
 	if !origin.isFinite() {
 		return Frame{}, ErrNonFinite
@@ -56,21 +74,35 @@ func NewFrame(origin, u, v Vec) (Frame, error) {
 	if !ok {
 		return Frame{}, ErrDegenerateFrame
 	}
-	// Scale v into the binade below 1 first: v·un can overflow to ±Inf while the
-	// perpendicular it feeds is perfectly finite, and an overflow here is
-	// indistinguishable from a vanishing perpendicular — a false "degenerate".
-	// Scaling by a power of two is bit-exact, and it never needs undoing: the
-	// perpendicular is normalized, and direction does not care about scale. A
-	// zero, NaN or infinite v has no scaling and no direction either, which is the
-	// degenerate case Normalize would have caught anyway.
-	vs, _, ok := v.scaledDown()
+	// Quarter v — an exact, bit-for-bit scaling that is never undone, since only
+	// the direction of the perpendicular is wanted. It buys headroom: the true
+	// perpendicular of two finite axes can want a component past MaxFloat64, and
+	// an overflow to ±Inf here is indistinguishable from a vanishing perpendicular
+	// — a false "degenerate". Quartered, |vsᵢ| <= ¼·Max and |unᵢ·(vs·un)| <=
+	// (√3/4)·Max, so their difference stays under Max.
+	vs := v.Scale(0.25)
+	// Remove the u-component of v, leaving the in-plane perpendicular. The
+	// projection goes through dotUnit — un is a unit vector — so a v holding an
+	// enormous component alongside a tiny one keeps the tiny one, which is often
+	// the whole of the perpendicular.
+	vp := vs.Sub(un.Scale(vs.dotUnit(un)))
+	// The perpendicular is taken for its DIRECTION, so it is normalized scale-free:
+	// its length is legitimately 1e-20 for v = (MaxFloat64, 1e-20, 0), and
+	// Normalize's zeroLen floor — a divide-by-zero guard sized for vectors of order
+	// one — would call that direction "degenerate" merely for being small. Zero, NaN
+	// and infinite v have no direction at all, and those direction does reject.
+	vn, ok := vp.direction()
 	if !ok {
 		return Frame{}, ErrDegenerateFrame
 	}
-	// Remove the u-component of v, leaving the in-plane perpendicular.
-	vp := vs.Sub(un.Scale(vs.Dot(un)))
-	vn, ok := vp.Normalize()
-	if !ok {
+	// What the floor was buying, bought properly. When v is collinear with u the
+	// subtraction above cancels to rounding noise, and that noise — as the
+	// (MaxFloat64, MaxFloat64, MaxFloat64) / half-of-it pair shows — is a multiple
+	// of u, not a perpendicular to it. So ASK whether the perpendicular is
+	// perpendicular, at the same tolerance [Frame.IsValid] will hold it to: a frame
+	// NewFrame returns always passes IsValid. Phrased positively, so a NaN that got
+	// this far fails it.
+	if !(math.Abs(un.Dot(vn)) <= orthoTol) {
 		return Frame{}, ErrDegenerateFrame
 	}
 	return Frame{origin: origin, u: un, v: vn}, nil
@@ -144,7 +176,12 @@ func (f Frame) ToWorld(local Vec) Vec {
 // ToWorldUV maps an in-plane 2D point (u, v) — the currency of a planar sketch
 // — to world space (w = 0).
 //
-// It carries the same accepted per-point overflow limit as [Frame.ToWorld].
+// It carries the same accepted per-point overflow limit as [Frame.ToWorld]: the
+// terms are summed in a fixed order, so coordinates near [math.MaxFloat64] can
+// drive an intermediate sum to ±Inf even when the exact result is representable.
+// ToWorldUV is infallible and so returns a Vec with a non-finite component rather
+// than an error — a wrong answer, not a refusal, which the caller must check for
+// itself at those magnitudes.
 func (f Frame) ToWorldUV(u, v float64) Vec {
 	return f.origin.Add(f.u.Scale(u)).Add(f.v.Scale(v))
 }
@@ -154,7 +191,12 @@ func (f Frame) ToWorldUV(u, v float64) Vec {
 // (the transpose), valid because the frame is orthonormal.
 //
 // "Exact" is about the algebra, not the arithmetic: it carries the same accepted
-// per-point overflow limit as [Frame.ToWorld], through the dot products.
+// per-point overflow limit as [Frame.ToWorld], through the dot products. Each
+// sums its terms in a fixed order, so a world point near [math.MaxFloat64] can
+// drive an intermediate sum — or the world−origin subtraction ahead of it — to
+// ±Inf where the exact local coordinate was representable. ToLocal is infallible
+// and so returns a Vec with a non-finite component rather than an error: a wrong
+// answer, not a refusal, and one the caller must check for at those magnitudes.
 func (f Frame) ToLocal(world Vec) Vec {
 	d := world.Sub(f.origin)
 	return Vec{d.Dot(f.u), d.Dot(f.v), d.Dot(f.N())}

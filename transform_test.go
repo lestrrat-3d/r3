@@ -422,6 +422,34 @@ func TestReflection(t *testing.T) {
 		require.InDelta(t, want, tr.Translation().Z, 1e295)
 	})
 
+	t.Run("a tiny offset survives an enormous origin component", func(t *testing.T) {
+		t.Parallel()
+
+		// The other end of the same range, and the one that bites: the plane's
+		// origin is (Max, 0, 1e-20) and its normal is exactly +Z, so origin·n is
+		// exactly 1e-20 and the offset is 2e-20. Scaling the ORIGIN by its largest
+		// component — Max — flushed the 1e-20 to zero, and Reflection then mirrored
+		// across the plane z = 0 instead: no error, no infinity, just the wrong
+		// plane. The dot is now taken by scaling the PRODUCTS, which a huge X cannot
+		// touch, because it is multiplied by n's zero X.
+		f, err := r3.NewFrame(r3.NewVec(math.MaxFloat64, 0, 1e-20), axisX, axisY)
+		require.NoError(t, err)
+		require.True(t, f.N().Equal(r3.NewVec(0, 0, 1), tol))
+
+		tr, err := r3.Reflection(f)
+		require.NoError(t, err)
+		require.True(t, tr.IsValid())
+		require.Equal(t, r3.NewVec(0, 0, 2e-20), tr.Translation())
+
+		// The defining property, which the translation alone does not prove: every
+		// point ON the mirror plane is fixed by the reflection. The origin is such a
+		// point, and the old code moved its z from 1e-20 to −1e-20.
+		require.Equal(t, f.Origin(), tr.Apply(f.Origin()))
+		require.Equal(t, f.ToWorldUV(2, 3), tr.Apply(f.ToWorldUV(2, 3)))
+		// And a point 1e-20 above the plane lands 1e-20 below it — z = 3e-20 → −1e-20.
+		require.InDelta(t, -1e-20, tr.Apply(r3.NewVec(0, 0, 3e-20)).Z, 1e-30)
+	})
+
 	t.Run("fixes points on the mirror plane", func(t *testing.T) {
 		t.Parallel()
 

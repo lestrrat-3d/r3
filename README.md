@@ -56,11 +56,12 @@ if err != nil {
 
 The package holds what *lives in* 3-space and what *acts on* it — vectors,
 frames, and the transforms between them. Nothing else. It carries no document
-state, and depends only on the standard library and
-[`lestrrat-3d/units`](https://github.com/lestrrat-3d/units), whose package code
-in turn imports only the standard library — so nothing outside stdlib enters a
-build of this package. (`units` requires testify to run its own tests; that is a
-test-only dependency and never reaches a build.)
+state. [`lestrrat-3d/units`](https://github.com/lestrrat-3d/units) is the **only**
+non-stdlib dependency a build pulls in — the one thing `go list -deps .` reports
+beyond the standard library — and its own package code imports nothing but the
+standard library, so the build graph stops there. (`units` requires testify to run
+its own tests; that is a test-only dependency of `units` and never reaches a
+build.)
 
 3D **shapes** (spheres, boxes, surfaces, solids) are deliberately **out of
 scope**. They belong to a geometry layer above, which imports this one for its

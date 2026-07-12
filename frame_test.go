@@ -80,6 +80,24 @@ func TestNewFrameDegenerate(t *testing.T) {
 	require.ErrorIs(t, err, r3.ErrDegenerateFrame, "collinear is collinear at any magnitude")
 }
 
+func TestNewFrameExtremeDynamicRangeAxis(t *testing.T) {
+	t.Parallel()
+
+	// u = X, v = (Max, 1e-20, 0): finite, and NOT collinear with u — its
+	// perpendicular component is the 1e-20 along Y. Scaling v by its own largest
+	// component (Max) to keep the projection from overflowing annihilated that
+	// 1e-20, the perpendicular came out zero, and NewFrame reported "zero or
+	// collinear axes" about axes that are neither. Dynamic range is not degeneracy
+	// any more than magnitude is.
+	f, err := r3.NewFrame(r3.Vec{}, r3.NewVec(1, 0, 0), r3.NewVec(math.MaxFloat64, 1e-20, 0))
+	require.NoError(t, err)
+	require.True(t, f.IsValid())
+	require.True(t, f.U().Equal(r3.NewVec(1, 0, 0), 1e-12))
+	require.True(t, f.V().Equal(r3.NewVec(0, 1, 0), 1e-12), "the perpendicular is the tiny Y component")
+	require.True(t, f.N().Equal(r3.NewVec(0, 0, 1), 1e-12))
+	require.InDelta(t, 0, f.U().Dot(f.V()), 1e-12)
+}
+
 func TestNewFrameNonFinite(t *testing.T) {
 	// Every comparison against NaN is false, so a guard phrased as a rejection
 	// would admit these; the frame that came back would not be orthonormal.
