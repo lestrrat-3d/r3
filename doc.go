@@ -85,14 +85,17 @@
 // two axes span no plane. These paths run once per frame or per feature, so the
 // care costs nothing.
 //
-// That judgement has a floor, and it is documented rather than hidden: an angle
-// below about two ULP (~5e-16 rad) is INDISTINGUISHABLE from collinear input
-// rounded by the caller's own arithmetic — v = 1.1*u, stored, leaves the same
-// one-ulp determinant residue as a deliberately one-ulp-off axis, and no
-// predicate can tell the two apart from the bits. NewFrame rejects both as
-// [ErrDegenerateFrame]: below the floor, the conservative error is preferred over
-// a frame whose normal direction would be the caller's rounding noise. A REAL
-// angle of 1e-13 rad — three orders above the floor, seven below orthoTol — still
+// That judgement has a floor, documented rather than hidden — and it is a floor
+// on EVIDENCE, not a blanket angular cutoff. A determinant that is the
+// cancellation residue of two nearly-equal products (within ~2 ULP of them) is
+// indistinguishable from collinear input rounded by the caller's own arithmetic
+// — v = 1.1*u, stored, leaves the same one-ulp residue as a deliberately
+// one-ulp-off axis — so [NewFrame] rejects it as [ErrDegenerateFrame] rather
+// than fabricate a normal from rounding noise. An UNCANCELLED determinant is
+// evidence at any magnitude: a perpendicular riding on a clean 1e-20 component
+// against MaxFloat64-scale axes (an angle of ~1e-328 rad) builds exactly. For
+// axes of comparable magnitude the practical floor is ~2 ULP of angle
+// (~5e-16 rad); a real 1e-13 rad plane — seven orders below orthoTol — still
 // builds.
 //
 // The PER-POINT mappings are the accepted exception, and there are five of them:

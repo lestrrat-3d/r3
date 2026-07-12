@@ -239,12 +239,15 @@ func TestNewFrameULPFloor(t *testing.T) {
 	t.Parallel()
 
 	// INTENTIONAL, owner-decided behavior — do not "fix" either direction.
-	// Below ~2 ULP of angle, "a real razor-thin plane" and "collinear input
-	// rounded by the caller's own arithmetic" are bit-identical: v = 1.1*u stored
-	// leaves the same one-ulp determinant residue as an axis deliberately one ulp
-	// off, and no predicate can tell them apart. NewFrame rejects BOTH rather than
-	// fabricate a normal out of rounding noise. This test pins both sides of the
-	// boundary so neither direction regresses silently.
+	// The floor is on EVIDENCE, not angle: when the determinant is the
+	// cancellation residue of two nearly-equal products, "a real razor-thin
+	// plane" and "collinear input rounded by the caller's own arithmetic" are
+	// bit-identical — v = 1.1*u stored leaves the same one-ulp residue as an axis
+	// deliberately one ulp off — and NewFrame rejects BOTH rather than fabricate
+	// a normal out of rounding noise. (An UNCANCELLED determinant builds at any
+	// angle, however tiny — see TestNewFrameOverflowingCrossRealPlane's
+	// ~1e-328 rad plane.) This test pins both sides of the cancellation boundary
+	// so neither direction regresses silently.
 	u := r3.NewVec(1, 1, 1)
 
 	// One ULP off: an angle of ~1.3e-16 rad. Indistinguishable from noise — rejected.

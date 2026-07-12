@@ -45,15 +45,20 @@ type Frame struct {
 // Axis MAGNITUDE is not a reason for refusal, however large, and neither is a
 // wide dynamic range WITHIN an axis — down to the smallest denormal.
 //
-// The ANGLE between the axes has a floor, though, and it is deliberate: an angle
-// below about two ULP (~5e-16 rad) is treated as collinear. At that separation
-// the bits cannot say whether the caller meant a razor-thin real plane or handed
-// in collinear input rounded by its own arithmetic — v = 1.1*u, stored, leaves
-// exactly the same one-ulp determinant residue as an axis deliberately one ulp
-// off — and a frame built there would carry a normal whose direction is that
-// rounding noise. Below the floor NewFrame prefers the conservative error to the
-// fabricated normal. A real angle of 1e-13 rad, three orders above the floor,
-// builds fine.
+// Collinearity does have a floor, though, and it is deliberate — but it is a
+// floor on EVIDENCE, not on angle. A cross determinant that is the CANCELLATION
+// RESIDUE of two nearly-equal products (within ~2 ULP of them) is treated as
+// zero: at that level the bits cannot say whether the caller meant a razor-thin
+// real plane or handed in collinear input rounded by its own arithmetic —
+// v = 1.1*u, stored, leaves exactly the same one-ulp residue as an axis
+// deliberately one ulp off — and a frame built there would carry a normal whose
+// direction is that rounding noise. NewFrame prefers the conservative error to
+// the fabricated normal. When the evidence is UNCANCELLED, no angle is too
+// small: a plane whose perpendicular rides entirely on a clean 1e-20 component
+// (an angle of ~1e-328 rad against MaxFloat64-scale axes) builds exactly,
+// because its determinant is a real value, not the tail of a subtraction. For
+// axes of ordinary, comparable magnitude the two coincide: the practical floor
+// is ~2 ULP of angle (~5e-16 rad), and a real 1e-13 rad plane builds fine.
 //
 // # Everything is judged on the axes AS GIVEN
 //
