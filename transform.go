@@ -1,0 +1,597 @@
+package r3
+
+import (
+	"errors"
+	"fmt"
+	"math"
+
+	"github.com/lestrrat-3d/units"
+)
+
+// ErrDegenerateAxis is returned by [Rotation] and [RotationAround] when the
+// rotation axis has no direction to rotate about — the zero vector, or one with
+// a NaN or infinite component. Magnitude alone is never the problem: an axis of
+// any nonzero finite length, however small or large, names a direction and is
+// accepted. Inventing a direction for the inputs that don't would fabricate
+// geometry that was never given.
+var ErrDegenerateAxis = errors.New("r3: degenerate rotation axis (no direction)")
+
+// ErrNotOrthonormal is returned when the linear part of a Transform is not made
+// of unit-length, mutually orthogonal vectors, so it describes a scale, a shear
+// or a collapse rather than a rigid motion. [FromBasis] returns it for a basis
+// handed to it that is not orthonormal WITHIN TOLERANCE — a scale, a shear, a
+// collapse; a skew merely at the tolerance level is snapped straight rather than
+// refused, see [FromBasis]. [Transform.Then] and [Transform.Inverse] return it
+// for the linear part they COMPUTE (see [Transform.Then]).
+var ErrNotOrthonormal = errors.New("r3: basis is not orthonormal")
+
+// Basis is the linear part of a [Transform]: the images of the world basis
+// vectors X, Y and Z. It is how a rotation is read out of a Transform (see
+// [Transform.Basis]) and fed back in ([FromBasis]) — for persistence, or to hand
+// a placement to a geometry kernel, an exporter or a renderer.
+//
+// It is a plain value with no operations of its own. The linear part is natively
+// three vectors, so it is exposed as three vectors: naming the axes rules out
+// the row/column mix-up that indexing a 3x3 array invites.
+type Basis struct {
+	EX, EY, EZ Vec
+}
+
+// Transform is a rigid motion of ℝ³: an orthogonal linear map followed by a
+// translation. It preserves distances and angles. Scale, shear and projection
+// are NOT representable — if you need them, they belong in a separate affine
+// type, not here: admitting scale would cost [Transform.Inverse] its exactness
+// and make normals require the inverse transpose.
+//
+// Both determinants are allowed. det = +1 is a proper rigid motion (a rotation
+// and/or translation); det = −1 is a reflection, which is still an isometry.
+// [Transform.IsReflection] reports which, because a consumer that cares about
+// orientation — a CAD kernel does; a reflected solid has inverted face normals —
+// must be able to ask.
+//
+// Transform is an immutable value: every method returns a new Transform and
+// none mutates the receiver.
+//
+// The zero value Transform{} is invalid, as reported by [Transform.IsValid].
+// Build one with [Identity], [Translation], [Rotation], [RotationAround],
+// [Reflection], [FromFrame] or [FromBasis], and derive others from it with
+// [Transform.Then] and [Transform.Inverse]. Those are the only ways to obtain
+// one, and none of them can produce a non-isometry: every one of them but
+// [Identity] is fallible, and each validates the whole of what it PRODUCES — the
+// translation AND the linear part, not merely what it consumes — returning
+// [ErrNonFinite] or [ErrNotOrthonormal] rather than a Transform that is not a
+// rigid motion. Composition is included on purpose: two valid transforms can
+// compose to an overflowing translation, or to a linear part whose orthonormality
+// error has grown past the tolerance that admitted them, and a method that could
+// hand either back would sink the invariant just as surely as a careless
+// constructor. The invariant is enforced, not merely documented.
+type Transform struct {
+	ex, ey, ez Vec // images of the basis vectors — the linear part, by columns
+	t          Vec // translation
+}
+
+// Identity returns the transform that leaves every point where it is.
+func Identity() Transform {
+	return Transform{
+		ex: Vec{X: 1},
+		ey: Vec{Y: 1},
+		ez: Vec{Z: 1},
+	}
+}
+
+// Translation returns the transform that displaces every point by v and leaves
+// every direction untouched.
+//
+// It returns [ErrNonFinite] when v has a NaN or infinite component. A
+// displacement by NaN is not a displacement, and the resulting Transform would
+// send every point to NaN while claiming to be a rigid motion — so the error is
+// the price of the invariant. [Identity] takes no input and therefore cannot
+// fail; it stays infallible.
+func Translation(v Vec) (Transform, error) {
+	if !v.isFinite() {
+		return Transform{}, ErrNonFinite
+	}
+	t := Identity()
+	t.t = v
+	return t, nil
+}
+
+// Rotation returns a right-handed rotation of angle about axis, through the
+// origin. The axis need not be unit length; only its direction is used, and the
+// direction is taken scale-free — an axis of (1e-20, 0, 0) IS the +X axis, and a
+// magnitude that would overflow or underflow ordinary normalization changes
+// nothing. Smallness is not degeneracy anywhere else in this package, and it is
+// not here.
+//
+// It returns [ErrDegenerateAxis] when axis is the zero vector — the one input
+// with no direction at all — or a NaN/infinite one, and wraps
+// [units.ErrIncompatible] when angle does not measure an angle — which rejects a
+// length, a bare scalar, and the zero units.Value (whose kind is dimensionless,
+// not angle) alike. A forgotten angle is therefore an error rather than a silent
+// identity rotation.
+//
+// It returns [ErrNonFinite] when angle is an angle of NaN or infinite magnitude.
+// The unit KIND being right is not enough: math.Sincos of either returns NaN, so
+// the basis would come out NaN with a nil error beside it. There is no rotation
+// by an infinite amount and none by NaN, so there is nothing to return but an
+// error.
+//
+// To rotate about an axis that does not pass through the origin, use
+// [RotationAround].
+func Rotation(axis Vec, angle units.Value) (Transform, error) {
+	// direction, not Normalize: the axis is wanted only for its direction, and
+	// Normalize's zeroLen floor — a divide-by-zero guard sized for vectors of
+	// order one — would call a real 1e-20 axis "zero". Zero/NaN/Inf still reject.
+	n, ok := axis.direction()
+	if !ok {
+		return Transform{}, ErrDegenerateAxis
+	}
+	rad, err := angle.In(units.Radian)
+	if err != nil {
+		return Transform{}, fmt.Errorf("r3: rotation angle: %w", err)
+	}
+	if !isFinite(rad) {
+		return Transform{}, ErrNonFinite
+	}
+	sin, cos := math.Sincos(rad)
+	return Transform{
+		ex: rodrigues(Vec{X: 1}, n, sin, cos),
+		ey: rodrigues(Vec{Y: 1}, n, sin, cos),
+		ez: rodrigues(Vec{Z: 1}, n, sin, cos),
+	}, nil
+}
+
+// rodrigues rotates v about the unit axis n by the angle whose sine and cosine
+// are sin and cos.
+func rodrigues(v, n Vec, sin, cos float64) Vec {
+	return v.Scale(cos).
+		Add(n.Cross(v).Scale(sin)).
+		Add(n.Scale(n.Dot(v) * (1 - cos)))
+}
+
+// RotationAround returns a right-handed rotation of angle about the axis through
+// center along axis. The center is a fixed point of the result.
+//
+// It returns the same errors as [Rotation], plus [ErrNonFinite] when center has
+// a NaN or infinite component — a rotation about a pivot that is nowhere is not
+// a rotation — and, like [Reflection], when the translation it COMPUTES is not
+// finite even though every input was. The composed offset is center − R·center,
+// so a pivot far enough out (near MaxFloat64) overflows to infinity. What is
+// validated is the RESULT; the check rides on [Transform.Then], which performs
+// it for every composition.
+func RotationAround(center, axis Vec, angle units.Value) (Transform, error) {
+	rot, err := Rotation(axis, angle)
+	if err != nil {
+		return Transform{}, err
+	}
+	// Move center to the origin, rotate there, move it back.
+	there, err := Translation(center.Scale(-1))
+	if err != nil {
+		return Transform{}, err
+	}
+	back, err := Translation(center)
+	if err != nil {
+		return Transform{}, err
+	}
+	spun, err := there.Then(rot)
+	if err != nil {
+		return Transform{}, err
+	}
+	return spun.Then(back)
+}
+
+// Reflection returns the reflection across the plane of mirror — the plane
+// through the frame's origin spanned by its U and V axes. The result is
+// improper: its determinant is −1 and [Transform.IsReflection] reports true.
+//
+// It returns [ErrDegenerateFrame] when mirror is not a valid frame, because a
+// zero frame has no plane to reflect across and would yield a Transform that is
+// not an isometry at all.
+//
+// It returns [ErrNonFinite] when mirror's origin is not finite, and — the case
+// input validation alone would never have caught — when the translation it
+// COMPUTES is not finite even though every input was. The offset is 2(origin·n)n,
+// so a plane a finite but enormous distance along its own normal (past
+// MaxFloat64/2) doubles to +Inf. What is validated here is therefore the RESULT:
+// a Transform that exists is a real rigid motion, with no asterisk.
+//
+// That rejection is reserved for an offset that is genuinely unrepresentable, not
+// for one that merely passes near the ceiling on its way to an ordinary value.
+// The dot product goes through [Vec.dotUnit], which scales the three PRODUCTS by
+// a power of two — never the origin — so both extremes come out right:
+//
+//   - a plane through (MaxFloat64, MaxFloat64, −MaxFloat64) with normal (1, 1, 1)/√3,
+//     whose offset components are about ⅔·MaxFloat64 and so comfortably finite, is
+//     built. The naive 2(origin·n) overflowed inside the dot and the plane was
+//     refused.
+//   - a plane through (MaxFloat64, 0, 1e-20) with normal (0, 0, 1), whose offset is
+//     the tiny 2e-20, keeps it. Scaling the ORIGIN by its largest component — as
+//     this once did — would have flushed the 1e-20 to zero and reflected across the
+//     wrong plane, silently: no error, no infinity, just a mirror through the origin
+//     that no longer fixes the points lying on it.
+//
+// The doubling is applied after the normal is scaled, component by component, so
+// it overflows only when a component of the offset itself is past MaxFloat64.
+func Reflection(mirror Frame) (Transform, error) {
+	// Checked ahead of IsValid — which would also reject it — so that a plane
+	// anchored nowhere is reported as the non-finite position it is, and not as a
+	// complaint about axes that were never at fault. FromFrame orders it the same
+	// way.
+	if !mirror.Origin().isFinite() {
+		return Transform{}, ErrNonFinite
+	}
+	if !mirror.IsValid() {
+		return Transform{}, ErrDegenerateFrame
+	}
+	n := mirror.N()
+	// Offset the plane from the origin: a point at distance d along n lands at
+	// −d, so the whole reflection shifts by 2(origin·n)n.
+	//
+	// dotUnit gives d = origin·n without an overflow inside the sum (n is a unit
+	// vector, so the products cannot overflow at all). The doubling comes LAST,
+	// after d is spread over n's components — 2·d can be +Inf while every 2·d·nᵢ
+	// is finite. What is left is the honest overflow: an offset component past
+	// MaxFloat64 comes back ±Inf and is rejected below.
+	t := n.Scale(mirror.Origin().dotUnit(n)).Scale(2)
+	if !t.isFinite() {
+		return Transform{}, ErrNonFinite
+	}
+	return Transform{
+		ex: householder(Vec{X: 1}, n),
+		ey: householder(Vec{Y: 1}, n),
+		ez: householder(Vec{Z: 1}, n),
+		t:  t,
+	}, nil
+}
+
+// householder reflects v across the plane through the origin with unit normal n.
+func householder(v, n Vec) Vec {
+	return v.Sub(n.Scale(2 * v.Dot(n)))
+}
+
+// FromFrame returns the transform that maps frame-local coordinates to world
+// coordinates: FromFrame(f).Apply(local) is f.ToWorld(local), and its inverse is
+// f.ToLocal. It is proper — a Frame is right-handed, so the determinant is +1.
+//
+// It returns [ErrDegenerateFrame] when f's axes are not orthonormal, and
+// [ErrNonFinite] when f's origin is not finite — the origin becomes the
+// transform's translation verbatim, so it is checked first and reported for what
+// it is rather than being folded into a complaint about the axes.
+//
+// To move a body from one frame to another, compose:
+//
+//	from, err := r3.FromFrame(a) // handle err
+//	to, err := r3.FromFrame(b)   // handle err
+//	out, err := from.Inverse()   // handle err
+//	place, err := out.Then(to)   // handle err
+//
+// which reads as "express the point in a's local coordinates, then plant those
+// coordinates in b". [Transform.Inverse] and [Transform.Then] are fallible for
+// the same reason the constructors are: the composed translation can overflow
+// even when both operands are impeccable.
+func FromFrame(f Frame) (Transform, error) {
+	if !f.Origin().isFinite() {
+		return Transform{}, ErrNonFinite
+	}
+	if !f.IsValid() {
+		return Transform{}, ErrDegenerateFrame
+	}
+	return Transform{ex: f.U(), ey: f.V(), ez: f.N(), t: f.Origin()}, nil
+}
+
+// FromBasis rebuilds a transform from a linear part and a translation — the
+// inverse of reading [Transform.Basis] and [Transform.Translation] out. It is
+// the way a stored transform comes back from disk.
+//
+// It returns [ErrNotOrthonormal] unless b's vectors are unit length and mutually
+// orthogonal WITHIN [Transform.IsValid]'s tolerance (1e-9), and [ErrNonFinite] when t
+// is not finite. Those checks are what stop FromBasis from being a back door:
+// neither a scale, nor a shear, nor a NaN position can enter the type through it.
+// The translation is checked first, so a bad t is reported as the non-finite value
+// it is instead of as a complaint about a basis that was perfectly fine.
+//
+// # The basis is orthonormalized, not stored verbatim
+//
+// The tolerance admits a basis that is very slightly skewed — a round-trip
+// through a text format, or a rotation matrix that has been multiplied a few
+// times, comes back with an EX·EY of, say, 7e-10 rather than 0. Such a basis used
+// to be STORED as it arrived, and that quietly falsified the package's headline
+// claim: the transpose is the exact inverse of a TRULY orthonormal basis and of
+// nothing else, so [Transform.Inverse] of such a transform was not exact — a point
+// at (10, 10, 0) came back some 1e-8 away from where it started.
+//
+// So FromBasis validates first and then ORTHONORMALIZES what it admitted (Gram–
+// Schmidt, exactly as [NewFrame] does for a Frame's axes), and it is the
+// orthonormalized basis that is stored. Every Transform in this package therefore
+// holds a linear part that is orthonormal to machine precision, and "Inverse is
+// exact" is true without an asterisk. The two halves are not in tension: the
+// tolerance decides what is ADMITTED, and it is unchanged — a scale, a shear, a
+// collapse, a 45° skew are all still refused, because snapping those straight
+// would silently return a transform that is not the one the caller described. It
+// only decides what is CORRECTED, which is drift at the level of the tolerance
+// itself.
+//
+// Orthonormalizing preserves HANDEDNESS. An improper basis (det = −1, a
+// reflection) survives with [Transform.IsReflection] still true, because all three
+// vectors are Gram–Schmidt'ed in turn — EZ is made perpendicular to the corrected
+// EX and EY, never REPLACED by EX × EY, which would flip an improper basis proper
+// without a word.
+func FromBasis(b Basis, t Vec) (Transform, error) {
+	out := Transform{ex: b.EX, ey: b.EY, ez: b.EZ, t: t}
+	if err := out.validate(); err != nil {
+		return Transform{}, err
+	}
+	on, ok := orthonormalize(b)
+	if !ok {
+		// Unreachable: validate has just established that all three vectors are
+		// within 1e-9 of unit length and of mutual orthogonality, so no length here
+		// is anywhere near zero. Kept because a silently non-unit basis is precisely
+		// what this constructor exists to refuse.
+		return Transform{}, ErrNotOrthonormal
+	}
+	return Transform{ex: on.EX, ey: on.EY, ez: on.EZ, t: t}, nil
+}
+
+// orthonormalize returns the Gram–Schmidt orthonormalization of b, or false when
+// some vector has no direction left after the projections are removed. It is only
+// ever handed a basis that is already orthonormal within tolerance, so the
+// projections it removes are tiny and the false case cannot arise; the boolean is
+// the guard, not a workhorse.
+//
+// It is the SIGN OF THE DETERMINANT that dictates the shape of this: all three
+// vectors go through the procedure, EZ included. Gram–Schmidt is the QR
+// factorisation with a positive diagonal in R, so det(Q) has the sign of det(b) —
+// an improper basis comes out improper, a proper one proper. The tempting
+// shortcut — orthonormalize EX and EY, then set EZ = EX × EY — always produces a
+// RIGHT-handed result, and would turn a reflection into a rotation while reporting
+// nothing.
+func orthonormalize(b Basis) (Basis, bool) {
+	ex, ok := b.EX.Normalize()
+	if !ok {
+		return Basis{}, false
+	}
+	// Remove EX's component from EY. dotUnit, because ex is a unit vector.
+	ey, ok := b.EY.Sub(ex.Scale(b.EY.dotUnit(ex))).Normalize()
+	if !ok {
+		return Basis{}, false
+	}
+	// And both of theirs from EZ — deriving it as EX × EY instead would discard the
+	// handedness that EZ is the only remaining witness of.
+	ez, ok := b.EZ.Sub(ex.Scale(b.EZ.dotUnit(ex))).Sub(ey.Scale(b.EZ.dotUnit(ey))).Normalize()
+	if !ok {
+		return Basis{}, false
+	}
+	return Basis{EX: ex, EY: ey, EZ: ez}, true
+}
+
+// Apply maps a point: the linear part, then the translation.
+//
+// Use [Transform.ApplyDir] for a direction or a normal. The distinction is not
+// sugar — applying Apply to a normal translates it, which is silently wrong.
+//
+// It shares the package's accepted per-point limit: the terms are summed in a
+// fixed order, so a point near [math.MaxFloat64] can drive an intermediate sum to
+// ±Inf even when the exact result is representable. Apply is infallible and has no
+// error to return, so it hands back a Vec with a non-finite COMPONENT rather than
+// refusing — a wrong answer, not a refusal, and a caller working at those
+// magnitudes must check the returned Vec itself. See [Transform.ApplyDir] for why
+// the hot path is not bought off.
+func (t Transform) Apply(p Vec) Vec {
+	return t.ApplyDir(p).Add(t.t)
+}
+
+// ApplyDir maps a direction: the linear part only, with no translation. A
+// direction has no position, so it does not move when space does.
+//
+// A normal transforms exactly like a direction here — no inverse transpose is
+// needed. That is a dividend of excluding scale: under a general affine map a
+// normal needs the inverse transpose, and everyone forgets. Here it cannot be
+// got wrong.
+//
+// # Accepted limit: coordinates near MaxFloat64
+//
+// The three terms ex·x + ey·y + ez·z are summed in a fixed order, so a partial
+// sum can overflow to ±Inf even when the final result would be finite: with a
+// basis row of (⅔, ⅔, −⅓) and a d whose components are near [math.MaxFloat64],
+// ⅔·Max + ⅔·Max is +Inf before the −⅓·Max that would have brought it back to
+// Max. Such a d comes back non-finite, and the fallible callers that compute with
+// it — [Transform.Then] and [Transform.Inverse] — then return [ErrNonFinite] for
+// a composition whose true value was perfectly representable.
+//
+// This is deliberate, and it is shared by every PER-POINT mapping in the package —
+// ApplyDir, [Transform.Apply], [Frame.ToWorld], [Frame.ToWorldUV] and
+// [Frame.ToLocal] all sum in fixed order and all behave this way. They run once per
+// transformed point and are the hottest code here; overflow-safe accumulation would
+// tax every point forever to serve coordinates that cannot occur. The unit of this
+// library is the millimetre, and 1e308 mm is some 1e289 light-years — there is no
+// model, no scene and no tolerance stack anywhere near it. The COLD paths, called
+// once per frame or per feature, do pay that cost: [NewFrame] and [Reflection]
+// scale their arithmetic and accept such input.
+//
+// How that surfaces depends on who calls it, and the difference matters:
+//
+//   - Through [Transform.Then] or [Transform.Inverse], the ±Inf is caught by the
+//     [Transform] invariant and comes back as [ErrNonFinite]. The transform is
+//     refused, never silently wrong: a rejected transform is a nuisance, a
+//     silently wrong isometry is a defect.
+//   - Called DIRECTLY, ApplyDir and [Transform.Apply] have no error to return, so
+//     they hand back a Vec with a non-finite component — for the (⅔, ⅔, −⅓) row
+//     above, +Inf where the exact answer was MaxFloat64. This one IS a wrong
+//     answer rather than an error, and it is the honest price of keeping the hot
+//     path branch-free. A caller feeding coordinates near MaxFloat64 into Apply
+//     must check the result itself.
+func (t Transform) ApplyDir(d Vec) Vec {
+	return t.ex.Scale(d.X).
+		Add(t.ey.Scale(d.Y)).
+		Add(t.ez.Scale(d.Z))
+}
+
+// Then composes: it returns the transform that applies t first and next second,
+// so a.Then(b) applied to p equals b.Apply(a.Apply(p)).
+//
+// Read it left to right, in application order. Note that this is the REVERSE of
+// matrix notation, where the same composition is written B·A — which is exactly
+// why the method is named Then and not Mul.
+//
+// Composition is where the invariant would otherwise leak — a constructor that
+// validates what it produces buys nothing if a method can then produce an
+// unvalidated Transform out of two valid ones. So the RESULT is validated, whole:
+// both its translation and its linear part.
+//
+// It returns [ErrNonFinite] when the composed translation overflows, which two
+// individually valid transforms can do: translating by MaxFloat64 along X, then
+// again by MaxFloat64 along X, lands at +Inf.
+//
+// It also returns [ErrNonFinite] in the narrower case where the composed
+// translation is mathematically finite but a partial sum inside [Transform.ApplyDir]
+// overflowed on the way to it — coordinates within a factor of a few of
+// MaxFloat64. That conservative rejection is an accepted limit of the hot path,
+// not an oversight; see [Transform.ApplyDir] for why it is not bought off.
+//
+// It returns [ErrNotOrthonormal] when the composed linear part is not orthonormal
+// within tolerance. This is NOT an overflow — the images of unit vectors under an
+// orthonormal basis stay bounded — it is orthonormality error accumulating.
+// Orthonormality is judged with slack (1e-9), and slack composes: a linear part
+// whose EX·EY is 7e-10 is inside the tolerance and IsValid says so, yet composed
+// with itself it doubles to 1.4e-9, which is outside. Two valid transforms, an
+// invalid product: the linear part has to be checked, not reasoned away. That the
+// constructors now leave no slack of their own to compose ([FromBasis]
+// orthonormalizes; [Rotation] and [Reflection] are exact bar rounding) shrinks the
+// case, it does not close it — rounding still accumulates over a long chain, and
+// the same check rejects a zero-value receiver or argument, whose zero basis
+// composes to a zero basis.
+func (t Transform) Then(next Transform) (Transform, error) {
+	out := Transform{
+		ex: next.ApplyDir(t.ex),
+		ey: next.ApplyDir(t.ey),
+		ez: next.ApplyDir(t.ez),
+		t:  next.Apply(t.t),
+	}
+	if err := out.validate(); err != nil {
+		return Transform{}, err
+	}
+	return out, nil
+}
+
+// validate reports why t is not a rigid motion, or nil when it is one. It is the
+// check that every fallible path PRODUCING a Transform runs on its result.
+//
+// The order is deliberate: a non-finite translation is named for what it is,
+// [ErrNonFinite], rather than folded into a complaint about a linear part that
+// may be perfectly orthonormal. Only then is the linear part judged, and a
+// failure there — including a NaN or infinite component, which fails the
+// positively phrased guards in [Transform.IsValid] — is [ErrNotOrthonormal].
+func (t Transform) validate() error {
+	if !t.t.isFinite() {
+		return ErrNonFinite
+	}
+	if !t.IsValid() {
+		return ErrNotOrthonormal
+	}
+	return nil
+}
+
+// Inverse returns the transform that undoes t.
+//
+// It is exact and cheap: the linear part is orthogonal, so its inverse is its
+// transpose — three dot products, never a matrix solve. This is the same
+// property [Frame.ToLocal] relies on, and it is the reason scale is excluded
+// from the type.
+//
+// Exact means exact, and that rests on every Transform holding a linear part that
+// is orthonormal to machine precision rather than merely within the 1e-9 tolerance
+// that ADMITS one. The transpose is the exact inverse of a truly orthonormal basis
+// and of nothing else: for a basis skewed by even 7e-10 it is only an
+// approximation, and the round trip drifts by about 1e-8 — which is why
+// [FromBasis], the one door such a basis could come in through, orthonormalizes
+// what it admits. Round-tripping a point through Inverse therefore returns it to
+// within a few ulps, not to within the tolerance.
+//
+// It returns [ErrNonFinite] when the inverted translation overflows. Exactness
+// is not the same as safety: the inverse translation is −Lᵀ·t, and each of those
+// three dot products sums three products, so a huge-but-finite translation in a
+// rotated basis can carry a component past MaxFloat64 even though t itself was
+// perfectly valid. It returns the same error, conservatively, when only an
+// INTERMEDIATE sum inside [Transform.ApplyDir] overflows and the true inverse
+// translation would have been finite — the accepted hot-path limit documented on
+// [Transform.ApplyDir]. Either way the answer is an error, never a wrong transform.
+//
+// It returns [ErrNotOrthonormal] when the transposed linear part is not
+// orthonormal — which is exactly when t's own was not, the zero value Transform{}
+// being the plain case. A fallible method that produces a Transform validates the
+// whole of what it produces, so it cannot launder an invalid receiver into a
+// nil-error result.
+func (t Transform) Inverse() (Transform, error) {
+	// Transpose: the rows of the linear part become its columns.
+	inv := Transform{
+		ex: Vec{X: t.ex.X, Y: t.ey.X, Z: t.ez.X},
+		ey: Vec{X: t.ex.Y, Y: t.ey.Y, Z: t.ez.Y},
+		ez: Vec{X: t.ex.Z, Y: t.ey.Z, Z: t.ez.Z},
+	}
+	// Undo the translation in the un-rotated frame: −Lᵀ·t.
+	inv.t = inv.ApplyDir(t.t).Scale(-1)
+	if err := inv.validate(); err != nil {
+		return Transform{}, err
+	}
+	return inv, nil
+}
+
+// IsValid reports whether the linear part is orthonormal AND the translation is
+// finite, i.e. whether t is a rigid motion. The zero value Transform{} is not
+// valid. Use it to vet a transform supplied by a caller before building geometry
+// on it.
+//
+// The translation counts. An orthonormal basis paired with a NaN translation
+// still sends every point to NaN: it is a rigid motion of nothing. Checking only
+// the linear part would call that valid.
+//
+// A NaN or infinite component makes t invalid. Every check is phrased
+// positively (!(x <= tol) rather than x > tol) so that a comparison against NaN
+// — which is false whichever way it is written — rejects rather than admits.
+func (t Transform) IsValid() bool {
+	if !t.t.isFinite() {
+		return false
+	}
+	for _, v := range []Vec{t.ex, t.ey, t.ez} {
+		if !(math.Abs(v.Len()-1) <= orthoTol) {
+			return false
+		}
+	}
+	if !(math.Abs(t.ex.Dot(t.ey)) <= orthoTol) {
+		return false
+	}
+	if !(math.Abs(t.ey.Dot(t.ez)) <= orthoTol) {
+		return false
+	}
+	return math.Abs(t.ez.Dot(t.ex)) <= orthoTol
+}
+
+// IsReflection reports whether t reverses orientation, i.e. whether its
+// determinant is −1. A consumer that cares about handedness must ask: a
+// reflected solid has inverted face normals, and a right-handed [Frame] cannot
+// survive a reflection unchanged.
+func (t Transform) IsReflection() bool {
+	return t.ex.Cross(t.ey).Dot(t.ez) < 0
+}
+
+// Translation returns the displacement part of t.
+func (t Transform) Translation() Vec { return t.t }
+
+// Basis returns the linear part of t: the images of the world basis vectors.
+// Together with [Transform.Translation] it is everything needed to reconstruct t
+// via [FromBasis], or to hand the placement to a kernel or an exporter.
+func (t Transform) Basis() Basis {
+	return Basis{EX: t.ex, EY: t.ey, EZ: t.ez}
+}
+
+// Equal reports whether t and o agree within tol, comparing the linear part and
+// the translation componentwise.
+//
+// tol is a comparison tolerance chosen by the caller. It is unrelated to the
+// fixed threshold [Transform.IsValid] uses to police orthonormality.
+func (t Transform) Equal(o Transform, tol float64) bool {
+	return t.ex.Equal(o.ex, tol) &&
+		t.ey.Equal(o.ey, tol) &&
+		t.ez.Equal(o.ez, tol) &&
+		t.t.Equal(o.t, tol)
+}

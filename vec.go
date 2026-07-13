@@ -1,11 +1,35 @@
 package r3
 
-import "math"
+import (
+	"errors"
+	"math"
+)
+
+// ErrNonFinite is returned by any constructor handed — or computing — a NaN or
+// infinite number: an angle, a position, an origin, a translation. Such a value
+// is not a point of ℝ³ and not an amount of rotation, so no rigid motion
+// corresponds to it. Every constructor rejects it rather than propagate it,
+// which is what keeps the [Transform] and [Frame] invariants true without an
+// asterisk.
+//
+// It is distinct from [ErrDegenerateAxis], [ErrDegenerateFrame] and
+// [ErrNotOrthonormal]: those name a direction that cannot be recovered from the
+// input, whereas this one names a number that was never real to begin with.
+var ErrNonFinite = errors.New("r3: non-finite value (NaN or Inf)")
 
 // zeroLen is the threshold below which a vector is treated as having no
 // direction. It is a divide-by-zero guard for Normalize, not a geometric
 // tolerance.
 const zeroLen = 1e-12
+
+// isFinite reports whether x is a real number: neither NaN nor infinite.
+//
+// The predicate is phrased positively — |x| <= MaxFloat64, an ACCEPT test —
+// rather than as a rejection such as math.IsNaN(x) || math.IsInf(x, 0). A NaN
+// compares false against every bound whichever way the test is written, so it
+// must be made to fail an accept test; a reject test it would sail straight
+// through. The whole package leans on this convention.
+func isFinite(x float64) bool { return math.Abs(x) <= math.MaxFloat64 }
 
 // Vec is a vector (or point) in 3-space: pure transient coordinate math. It
 // carries no document state.
@@ -38,16 +62,341 @@ func (v Vec) Cross(o Vec) Vec {
 }
 
 // Len returns the Euclidean length of v.
-func (v Vec) Len() float64 { return math.Sqrt(v.Dot(v)) }
+//
+// It is computed by nested [math.Hypot] rather than the naive sqrt of the sum of
+// squares: squaring a large-but-finite component overflows to +Inf (e.g. 1e200²)
+// and a small one underflows to 0, so the naive form reports an infinite length
+// for a perfectly representable vector. Hypot scales internally and so is exact
+// over the whole finite range.
+//
+// Len is NaN only if some component is NaN. It is +Inf if some component is
+// infinite — and also in the one honest overflow: when the true length is itself
+// past [math.MaxFloat64], as for (MaxFloat64, MaxFloat64, 0), whose length is
+// √2·MaxFloat64. No float64 can name that number, so no implementation could do
+// better. The DIRECTION of such a vector is still recoverable, and
+// [Vec.Normalize] recovers it without going through Len.
+func (v Vec) Len() float64 { return math.Hypot(math.Hypot(v.X, v.Y), v.Z) }
 
-// Normalize returns the unit vector along v and true, or the zero vector and
-// false when v is (near-)zero. The boolean is deliberate: unlike a
-// floor-against-zero helper, Normalize never fabricates a non-unit direction
-// from a zero vector — callers must handle the false case.
-func (v Vec) Normalize() (Vec, bool) {
-	l := v.Len()
-	if l < zeroLen {
+// isFinite reports whether every component of v is finite, i.e. whether v names
+// an actual point (or direction) of ℝ³. A vector with a NaN or infinite
+// component does not, and no rigid motion can be built from it.
+func (v Vec) isFinite() bool { return isFinite(v.X) && isFinite(v.Y) && isFinite(v.Z) }
+
+// dotUnit returns v · u, where u MUST be a unit vector. That precondition is not
+// a formality: it is the whole reason the result cannot be got wrong by
+// overflowing on the way to it.
+//
+// Because every component of a unit vector obeys |uᵢ| <= 1, every product vᵢ·uᵢ
+// obeys |vᵢ·uᵢ| <= |vᵢ| <= MaxFloat64 — so the PRODUCTS can never overflow, only
+// their sum can (it can reach 3·MaxFloat64). The ordinary [Vec.Dot] sums them in
+// a fixed order and so can hit ±Inf mid-way to a result that was perfectly
+// representable, which the cold paths ([NewFrame], [Reflection]) must not accept:
+// there, an overflow is indistinguishable from a vanishing perpendicular or a
+// vanishing plane offset, and the caller is told "degenerate" about geometry that
+// was nothing of the kind.
+//
+// So: sum directly, and only if that sum is not finite, redo it with each product
+// scaled by the exact power of two ¼, which bounds the sum by ¾·MaxFloat64, and
+// scale the sum back by 4. Scaling by a power of two moves no mantissa bit, so the
+// detour is exact; and it scales the PRODUCTS, never v itself — scaling v by its
+// own largest component would annihilate a small-but-decisive component (a plane
+// at (MaxFloat64, 0, 1e-20) has offset 1e-20, and the offset is what is being
+// asked for). Only the scale-back can overflow, and it does so exactly when the
+// true dot product is past MaxFloat64 — a result worth reporting as ±Inf, which
+// the callers' finiteness guards then reject.
+//
+// A NaN or infinite component of v propagates into the result, as it should.
+func (v Vec) dotUnit(u Vec) float64 {
+	px, py, pz := v.X*u.X, v.Y*u.Y, v.Z*u.Z
+	// Phrased positively (an ACCEPT test) so that a NaN — false against every
+	// bound whichever way the test is written — takes the same path as an
+	// overflow rather than sailing through.
+	if s := px + py + pz; isFinite(s) {
+		return s
+	}
+	return ((px * 0.25) + (py * 0.25) + (pz * 0.25)) * 4
+}
+
+// crossNoise is the relative width of the band around zero within which the
+// difference of two float64 products cannot be told apart from zero. Each product
+// is already rounded (a relative error of at most the unit roundoff 2⁻⁵³), and so
+// is their difference, so the computed a·b − c·d sits within 2⁻⁵² · (|a·b| + |c·d|)
+// of the truth. A result inside that band is consistent with an exact zero.
+const crossNoise = 0x1p-52
+
+// diffProd returns a·b − c·d, or exactly 0 when the computed difference lies
+// inside the rounding band of the two products (see crossNoise) and so cannot be
+// distinguished from zero.
+//
+// The band is RELATIVE to the two products this particular difference was formed
+// from, never to the vectors as a whole — that distinction is the whole point. It
+// is what lets a·b − c·d be believed when its products are small or zero (the
+// perpendicular of v = (Max, SmallestNonzeroFloat64, 0) is that denormal, and no
+// large product went anywhere near the determinant that carries it) while being
+// disbelieved when two enormous products cancel down to a last-bit residue, which
+// is what collinear axes leave behind. A relative-to-|v| test would have thrown the
+// denormal away with the noise; an absolute floor would have done the same.
+//
+// The band collapses to zero when both products are zero or denormal, which is
+// exactly right: nothing rounded, so nothing is in doubt.
+//
+// Overflow passes straight through. |a·b − c·d| can reach 2·MaxFloat64 and go to
+// ±Inf; the band is summed term by term (each at most crossNoise·MaxFloat64) so it
+// stays finite, ±Inf is never inside it, and the caller sees the overflow it must
+// handle rather than a silent zero. A NaN fails the positively-phrased test and is
+// likewise passed on.
+func diffProd(a, b, c, d float64) float64 {
+	p, q := a*b, c*d
+	r := p - q
+	if !(math.Abs(r) > crossNoise*math.Abs(p)+crossNoise*math.Abs(q)) {
+		return 0
+	}
+	return r
+}
+
+// crossFiltered returns v × o with each component computed through [diffProd], so
+// that a component the arithmetic cannot tell from zero IS zero. The plain
+// [Vec.Cross] leaves a last-bit residue there instead, and a residue is a
+// direction — [NewFrame] uses this for its in-plane perpendicular so that
+// cancellation noise never masquerades as a component of one.
+//
+// Both operands must be small enough that no product can overflow — [NewFrame]
+// feeds it unit vectors. The COLLINEARITY decision does not come through here at
+// all: that is [Vec.crossExp], whose exponent-tracked arithmetic answers the
+// zero-or-not question without ever nearing the edges of float64's range.
+//
+// Zeroing a component changes it by no more than the error it already carried, so
+// this is not a loss of accuracy: it is a refusal to invent one.
+func (v Vec) crossFiltered(o Vec) Vec {
+	return Vec{
+		diffProd(v.Y, o.Z, v.Z, o.Y),
+		diffProd(v.Z, o.X, v.X, o.Z),
+		diffProd(v.X, o.Y, v.Y, o.X),
+	}
+}
+
+// expComp is one cross-product component held in (mantissa, exponent) form: the
+// value is m·2^e. m == 0 means the component is exactly zero (and e is then
+// meaningless). Nothing in this form can overflow or underflow: m stays within
+// (0.25, 2) in magnitude and e is an ordinary int, so the full determinant
+// arithmetic of a cross product — whose true values span MaxFloat64² down past
+// the denormals — is carried without ever touching the edges of float64's
+// exponent range.
+type expComp struct {
+	m float64
+	e int
+}
+
+// scaledTo returns the component's value as a float64 relative to the exponent
+// eMax, i.e. m·2^(e−eMax). eMax MUST be >= c.e for a nonzero c, so the result
+// never overflows. It CAN underflow to zero when c sits more than ~1100 binades
+// below eMax — harmless when the caller wants only a direction: a component
+// that far below the largest one is relatively smaller than 2⁻¹⁰⁷⁴ and could
+// not have moved the direction, and it CANNOT fake collinearity either, because
+// the zero/nonzero decision was already made per-component at the mantissa
+// level, where nothing underflows.
+func (c expComp) scaledTo(eMax int) float64 {
+	if c.m == 0 {
+		return 0
+	}
+	return math.Ldexp(c.m, c.e-eMax)
+}
+
+// diffProdExp returns a·b − c·d as an [expComp]: [diffProd] with the exponents
+// tracked separately, so that no product and no difference can overflow or
+// underflow on the way to the answer. It exists for the one question that must
+// not be answered through float64's exponent range — whether a cross product of
+// axes as extreme as (MaxFloat64/2, MaxFloat64/2, 1e-20) is zero. Those
+// components span more than 600 decimal orders, and NO vector-level rescaling
+// can bring them to a common scale without flushing the bottom end: the
+// representable range below 1.0 is only ~308 orders plus the denormals. Scaling
+// a vector by its own largest component — any variant of it — therefore
+// destroys exactly the small component that decides collinearity. Here nothing
+// is ever scaled by a data-dependent amount, so nothing decisive can be lost.
+//
+//	ma·2^ea = a (math.Frexp)     p = ma·md ∈ ±(0.25, 1) — no overflow possible
+//	                             ep = ea + ed — integer arithmetic, exact
+//
+// A zero operand is the special case: Frexp(0) is (0, 0), so a zero product
+// shows up as p == 0 with a meaningless exponent. A zero product contributes
+// exactly 0 at ANY exponent — nothing was rounded, nothing is in doubt — so it
+// is handled explicitly: both products zero is an exact zero, one product zero
+// hands back the other product alone, band-free.
+//
+// When both products are nonzero they are aligned to the larger exponent — an
+// exact power-of-two shift — and differenced there. A gap of more than ~53
+// binades leaves the smaller term far inside the larger one's rounding band,
+// where its loss to the shift is invisible; a gap past ~1100 flushes it to zero
+// outright, which is the same statement. The difference is then subject to the
+// SAME rounding-band test [diffProd] applies (see crossNoise), on the aligned
+// mantissas: a result the arithmetic cannot tell from zero IS zero. When no
+// product over- or underflows, this returns bit-for-bit what diffProd returns,
+// just carried as (m, e).
+func diffProdExp(a, b, c, d float64) expComp {
+	ma, ea := math.Frexp(a)
+	mb, eb := math.Frexp(b)
+	mc, ec := math.Frexp(c)
+	md, ed := math.Frexp(d)
+	p, ep := ma*mb, ea+eb
+	q, eq := mc*md, ec+ed
+	if p == 0 && q == 0 {
+		return expComp{}
+	}
+	if p == 0 {
+		return expComp{m: -q, e: eq}
+	}
+	if q == 0 {
+		return expComp{m: p, e: ep}
+	}
+	e := max(ep, eq)
+	pa := math.Ldexp(p, ep-e)
+	qa := math.Ldexp(q, eq-e)
+	r := pa - qa
+	// The rounding-band test, phrased positively as everywhere in the package: a
+	// NaN cannot arise here (the inputs are finite mantissas), but the convention
+	// is kept so the shape of every guard reads the same.
+	if !(math.Abs(r) > crossNoise*math.Abs(pa)+crossNoise*math.Abs(qa)) {
+		return expComp{}
+	}
+	return expComp{m: r, e: e}
+}
+
+// expCross is a cross product held componentwise in (mantissa, exponent) form —
+// see [expComp]. It is the package's collinearity kernel: exactly zero when and
+// only when the operands were collinear (or one was zero), with no overflow or
+// underflow anywhere between the operands and that verdict.
+type expCross [3]expComp
+
+// crossExp returns v × o as an [expCross], each component through [diffProdExp].
+// Both v and o MUST be finite. The operand order is the same as [Vec.Cross] and
+// just as load-bearing: swapping v and o negates every component.
+func (v Vec) crossExp(o Vec) expCross {
+	return expCross{
+		diffProdExp(v.Y, o.Z, v.Z, o.Y),
+		diffProdExp(v.Z, o.X, v.X, o.Z),
+		diffProdExp(v.X, o.Y, v.Y, o.X),
+	}
+}
+
+// isZero reports whether every component is exactly zero — for a cross product,
+// whether the operands were collinear. The verdict was reached per-component at
+// the mantissa level, so no magnitude of operand can have faked it.
+func (c expCross) isZero() bool {
+	return c[0].m == 0 && c[1].m == 0 && c[2].m == 0
+}
+
+// direction materializes the unit vector along the cross product, or false when
+// the cross product is zero and has no direction. The components are brought to
+// the largest exponent among them (each an exact power-of-two shift, none able
+// to overflow) and normalized from there; a component more than ~1100 binades
+// below the top flushes to zero on the way, which cannot move a direction by
+// even one ulp — see [expComp.scaledTo].
+func (c expCross) direction() (Vec, bool) {
+	if c.isZero() {
 		return Vec{}, false
 	}
-	return v.Scale(1 / l), true
+	e := math.MinInt
+	for _, comp := range c {
+		if comp.m != 0 && comp.e > e {
+			e = comp.e
+		}
+	}
+	return Vec{
+		X: c[0].scaledTo(e),
+		Y: c[1].scaledTo(e),
+		Z: c[2].scaledTo(e),
+	}.direction()
+}
+
+// direction returns the unit vector along v and true, or false when v has no
+// direction at all: v is exactly zero, or some component is NaN or infinite. It
+// is [Vec.Normalize] without the zeroLen floor — the magnitude is stripped by an
+// exact power-of-two scaling first, so the direction of a vector is recovered
+// wherever in the float64 range that vector lives, from MaxFloat64 down to the
+// denormals.
+//
+// That is exactly what the floor is FOR, so this is not a drop-in replacement:
+// Normalize's floor protects a CALLER who asks for the direction of what may be
+// noise. direction is for the one place inside the package that has already
+// established its vector is not noise — [NewFrame]'s in-plane perpendicular,
+// whose scale is set by axes the caller chose and can legitimately be 1e-20 (from
+// u = (1, 0, 0), v = (MaxFloat64, 1e-20, 0)) without being any less of a
+// direction. NewFrame checks the result is genuinely orthogonal to u, which is
+// what rules out the noise this helper would otherwise happily normalize.
+//
+// The guard is phrased positively (0 < m <= MaxFloat64, an ACCEPT test) so that a
+// NaN component — which makes m NaN, and every comparison against NaN is false —
+// fails it rather than sails through it.
+func (v Vec) direction() (Vec, bool) {
+	m := math.Max(math.Abs(v.X), math.Max(math.Abs(v.Y), math.Abs(v.Z)))
+	if !(m > 0 && m <= math.MaxFloat64) {
+		return Vec{}, false
+	}
+	// Scale the largest component into [0.5, 1) — exactly, by shifting exponents,
+	// so no mantissa bit moves. The scaled length then lies in [0.5, √3]: it can
+	// neither overflow nor underflow, whatever v was.
+	_, e := math.Frexp(m)
+	s := Vec{
+		X: math.Ldexp(v.X, -e),
+		Y: math.Ldexp(v.Y, -e),
+		Z: math.Ldexp(v.Z, -e),
+	}
+	return s.Scale(1 / s.Len()), true
+}
+
+// Equal reports whether v and o agree componentwise within tol. It is a
+// tolerant comparison for floating-point results, not an exact one: two vectors
+// that should be equal rarely are, bit for bit, once any arithmetic has touched
+// them.
+func (v Vec) Equal(o Vec, tol float64) bool {
+	return math.Abs(v.X-o.X) <= tol &&
+		math.Abs(v.Y-o.Y) <= tol &&
+		math.Abs(v.Z-o.Z) <= tol
+}
+
+// Normalize returns the unit vector along v and true, or the zero vector and
+// false when v has no usable direction. The boolean is deliberate: unlike a
+// floor-against-zero helper, Normalize never fabricates a non-unit direction —
+// callers must handle the false case.
+//
+// A direction is usable exactly when every component of v is finite and v is not
+// (near-)zero. So:
+//
+//   - any component is NaN or infinite: false. Such a v is not a vector of ℝ³ at
+//     all; there is no direction to report, and dividing through by +Inf would
+//     silently flatten v to the zero vector.
+//   - v is (near-)zero (length below zeroLen): false.
+//   - v is huge but finite, e.g. (1e200, 1e200, 1e200): true, with the correct
+//     unit vector.
+//   - v is so huge that its LENGTH overflows, e.g. (MaxFloat64, MaxFloat64, 0):
+//     also true, with the correct unit vector — here (1/√2, 1/√2, 0). The length
+//     is not representable but the direction is, and the direction is all
+//     Normalize was asked for. It is obtained by dividing v through by its
+//     largest absolute component first, which cannot overflow, and normalizing
+//     that. Rejecting this case would blame the direction for a defect of the
+//     magnitude — and callers such as [NewFrame] would then report "degenerate
+//     axes" about axes that were never degenerate.
+//
+// The guards are phrased positively (!(accept) rather than reject): a NaN
+// compares false whichever way the test is written, so it must fail an accept
+// test rather than pass a reject test.
+func (v Vec) Normalize() (Vec, bool) {
+	// Finiteness is checked on the COMPONENTS, not on the length: a finite v may
+	// still have an unrepresentable length, and that is not a reason to refuse it
+	// a direction.
+	if !v.isFinite() {
+		return Vec{}, false
+	}
+	l := v.Len()
+	if !(l >= zeroLen) {
+		return Vec{}, false
+	}
+	if l <= math.MaxFloat64 {
+		return v.Scale(1 / l), true
+	}
+	// The length overflowed even though v did not. Strip the magnitude first — an
+	// exact power-of-two scaling that leaves a vector whose length cannot overflow
+	// — and normalize that. The result is the direction of v, which is what was
+	// asked for; only its (unrepresentable) length is lost.
+	return v.direction()
 }
