@@ -8,10 +8,10 @@ import (
 )
 
 var (
-	transformVecSink   r3.Vec
-	transformSink      r3.Transform
-	transformBoolSink  bool
-	transformErrorSink error
+	transformVecSink  r3.Vec
+	transformSink     r3.Transform
+	transformBoolSink bool
+	errTransformSink  error
 )
 
 func benchmarkTransformPair(b *testing.B) (r3.Transform, r3.Transform) {
@@ -53,7 +53,7 @@ func BenchmarkTransformThen(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		transformSink, transformErrorSink = first.Then(second)
+		transformSink, errTransformSink = first.Then(second)
 	}
 }
 
@@ -62,7 +62,7 @@ func BenchmarkTransformInverse(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		transformSink, transformErrorSink = transform.Inverse()
+		transformSink, errTransformSink = transform.Inverse()
 	}
 }
 

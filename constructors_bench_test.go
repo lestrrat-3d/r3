@@ -10,7 +10,7 @@ import (
 var (
 	constructorTransformSink r3.Transform
 	constructorFrameSink     r3.Frame
-	constructorErrorSink     error
+	errConstructorSink       error
 )
 
 func benchmarkConstructorFrame(b *testing.B) r3.Frame {
@@ -40,7 +40,7 @@ func BenchmarkTranslation(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		constructorTransformSink, constructorErrorSink = r3.Translation(translation)
+		constructorTransformSink, errConstructorSink = r3.Translation(translation)
 	}
 }
 
@@ -50,7 +50,7 @@ func BenchmarkRotation(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		constructorTransformSink, constructorErrorSink = r3.Rotation(axis, angle)
+		constructorTransformSink, errConstructorSink = r3.Rotation(axis, angle)
 	}
 }
 
@@ -61,7 +61,7 @@ func BenchmarkRotationAround(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		constructorTransformSink, constructorErrorSink = r3.RotationAround(center, axis, angle)
+		constructorTransformSink, errConstructorSink = r3.RotationAround(center, axis, angle)
 	}
 }
 
@@ -72,7 +72,7 @@ func BenchmarkNewFrame(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		constructorFrameSink, constructorErrorSink = r3.NewFrame(origin, u, v)
+		constructorFrameSink, errConstructorSink = r3.NewFrame(origin, u, v)
 	}
 }
 
@@ -81,7 +81,7 @@ func BenchmarkReflection(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		constructorTransformSink, constructorErrorSink = r3.Reflection(mirror)
+		constructorTransformSink, errConstructorSink = r3.Reflection(mirror)
 	}
 }
 
@@ -90,7 +90,7 @@ func BenchmarkFromFrame(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		constructorTransformSink, constructorErrorSink = r3.FromFrame(frame)
+		constructorTransformSink, errConstructorSink = r3.FromFrame(frame)
 	}
 }
 
@@ -101,6 +101,6 @@ func BenchmarkFromBasis(b *testing.B) {
 	b.ReportAllocs()
 
 	for b.Loop() {
-		constructorTransformSink, constructorErrorSink = r3.FromBasis(basis, translation)
+		constructorTransformSink, errConstructorSink = r3.FromBasis(basis, translation)
 	}
 }
