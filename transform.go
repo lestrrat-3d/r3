@@ -158,29 +158,22 @@ func rodrigues(v, n Vec, sin, cos float64) Vec {
 // It returns the same errors as [Rotation], plus [ErrNonFinite] when center has
 // a NaN or infinite component — a rotation about a pivot that is nowhere is not
 // a rotation — and, like [Reflection], when the translation it COMPUTES is not
-// finite even though every input was. The composed offset is center − R·center,
-// so a pivot far enough out (near MaxFloat64) overflows to infinity. What is
-// validated is the RESULT; the check rides on [Transform.Then], which performs
-// it for every composition.
+// finite even though every input was. The offset is center − R·center, so a
+// pivot far enough out (near MaxFloat64) overflows to infinity. The result is
+// validated before it is returned.
 func RotationAround(center, axis Vec, angle units.Value) (Transform, error) {
 	rot, err := Rotation(axis, angle)
 	if err != nil {
 		return Transform{}, err
 	}
-	// Move center to the origin, rotate there, move it back.
-	there, err := Translation(center.Scale(-1))
-	if err != nil {
+	if !center.isFinite() {
+		return Transform{}, ErrNonFinite
+	}
+	rot.t = center.Sub(rot.ApplyDir(center))
+	if err := rot.validate(); err != nil {
 		return Transform{}, err
 	}
-	back, err := Translation(center)
-	if err != nil {
-		return Transform{}, err
-	}
-	spun, err := there.Then(rot)
-	if err != nil {
-		return Transform{}, err
-	}
-	return spun.Then(back)
+	return rot, nil
 }
 
 // Reflection returns the reflection across the plane of mirror — the plane
@@ -380,7 +373,11 @@ func orthonormalize(b Basis) (Basis, bool) {
 // magnitudes must check the returned Vec itself. See [Transform.ApplyDir] for why
 // the hot path is not bought off.
 func (t Transform) Apply(p Vec) Vec {
-	return t.ApplyDir(p).Add(t.t)
+	return Vec{
+		X: t.ex.X*p.X + t.ey.X*p.Y + t.ez.X*p.Z + t.t.X,
+		Y: t.ex.Y*p.X + t.ey.Y*p.Y + t.ez.Y*p.Z + t.t.Y,
+		Z: t.ex.Z*p.X + t.ey.Z*p.Y + t.ez.Z*p.Z + t.t.Z,
+	}
 }
 
 // ApplyDir maps a direction: the linear part only, with no translation. A
@@ -424,9 +421,11 @@ func (t Transform) Apply(p Vec) Vec {
 //     path branch-free. A caller feeding coordinates near MaxFloat64 into Apply
 //     must check the result itself.
 func (t Transform) ApplyDir(d Vec) Vec {
-	return t.ex.Scale(d.X).
-		Add(t.ey.Scale(d.Y)).
-		Add(t.ez.Scale(d.Z))
+	return Vec{
+		X: t.ex.X*d.X + t.ey.X*d.Y + t.ez.X*d.Z,
+		Y: t.ex.Y*d.X + t.ey.Y*d.Y + t.ez.Y*d.Z,
+		Z: t.ex.Z*d.X + t.ey.Z*d.Y + t.ez.Z*d.Z,
+	}
 }
 
 // Then composes: it returns the transform that applies t first and next second,

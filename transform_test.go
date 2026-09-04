@@ -71,6 +71,23 @@ func TestTransformApply(t *testing.T) {
 		require.True(t, tr.ApplyDir(d).Equal(d, tol), "a direction must not translate")
 	})
 
+	t.Run("preserves fixed accumulation order near MaxFloat64", func(t *testing.T) {
+		t.Parallel()
+
+		const max = math.MaxFloat64
+		b := r3.Basis{
+			EX: r3.NewVec(2, 2, -1).Scale(1.0 / 3.0),
+			EY: r3.NewVec(2, -1, 2).Scale(1.0 / 3.0),
+			EZ: r3.NewVec(-1, 2, 2).Scale(1.0 / 3.0),
+		}
+		tr, err := r3.FromBasis(b, r3.Vec{})
+		require.NoError(t, err)
+
+		d := r3.NewVec(max, max, max)
+		require.True(t, math.IsInf(tr.ApplyDir(d).X, 1))
+		require.True(t, math.IsInf(tr.Apply(d).X, 1))
+	})
+
 	t.Run("round-trip through the inverse", func(t *testing.T) {
 		t.Parallel()
 
@@ -861,6 +878,16 @@ func TestTransformDegenerateInput(t *testing.T) {
 
 		_, err = r3.RotationAround(r3.NewVec(0, math.Inf(1), 0), axisZ, units.Degrees(90))
 		require.ErrorIs(t, err, r3.ErrNonFinite)
+	})
+
+	t.Run("RotationAround keeps rotation errors ahead of center errors", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := r3.RotationAround(r3.NewVec(math.NaN(), 0, 0), r3.Vec{}, units.Degrees(90))
+		require.ErrorIs(t, err, r3.ErrDegenerateAxis)
+
+		_, err = r3.RotationAround(r3.NewVec(math.Inf(1), 0, 0), axisZ, units.Millimeters(1))
+		require.ErrorIs(t, err, units.ErrIncompatible)
 	})
 
 	t.Run("RotationAround rejects a translation that overflows", func(t *testing.T) {
