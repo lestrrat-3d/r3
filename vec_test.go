@@ -104,6 +104,42 @@ func TestVecLenDifferentialOrdinaryRange(t *testing.T) {
 	}
 }
 
+// TestVecLenRoundingIsArchitectureIndependent pins Len's fast path to an input
+// where forcing each square to round before the sum — this package's fix for
+// architecture-dependent results — gives a different last bit than a fused
+// multiply-add would give instead.
+//
+// wantSum and altSum below were established independently with math/big at
+// 300 bits of precision, not by trusting this package's own arithmetic:
+// wantSum is round(round(x*x) + round(y*y)), the double-rounded value Len must
+// return now that each square is explicitly converted to float64 before the
+// sum. altSum is round(x*x_exact + y*y_exact), the single-rounded value a
+// fused multiply-add computes instead by never rounding the first product on
+// its own. The Go spec permits a compiler to contract x*x + y*y + z*z into
+// exactly that fusion when the squares are not explicitly rounded first — see
+// the "Floating-point operators" section — and math.FMA (whose result is
+// fixed by IEEE 754 regardless of host CPU) confirms that fusing x's square
+// into the sum reproduces altSum bit for bit on this machine, even though this
+// machine's compiler does not perform that contraction for this expression
+// shape. The two sums, and their square roots, differ by one ulp: a build that
+// stopped forcing the rounding (e.g. the float64(...) conversions in Len were
+// removed) and ran on an architecture that contracts this pattern would return
+// altSum's square root here instead of wantSum's, so this test would fail
+// there even though it cannot fail on an architecture that does not contract.
+func TestVecLenRoundingIsArchitectureIndependent(t *testing.T) {
+	t.Parallel()
+
+	v := r3.NewVec(-2774.1700477135164, -27.781463809705347, 0)
+	const wantSum = 0x1.d5c65d0daed3ap+22 // round(round(x*x) + round(y*y))
+	const altSum = 0x1.d5c65d0daed3bp+22  // round(x*x_exact + y*y_exact), the fused alternative
+	require.NotEqual(t, wantSum, altSum, "test input does not distinguish double rounding from single rounding")
+
+	const want = 0x1.5ac9e48fe5a8dp+11 // math.Sqrt(wantSum)
+	const alt = 0x1.5ac9e48fe5a8ep+11  // math.Sqrt(altSum), what a fused build would return instead
+	require.NotEqual(t, want, alt, "test input's divergence does not survive Sqrt")
+	require.Equal(t, want, v.Len())
+}
+
 func TestVecEqual(t *testing.T) {
 	t.Parallel()
 

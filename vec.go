@@ -76,6 +76,17 @@ func (v Vec) Cross(o Vec) Vec {
 // those inputs use nested [math.Hypot], which scales internally and is safe over
 // the whole finite range.
 //
+// Each square is explicitly rounded to float64 before it is summed. The Go spec's
+// floating-point operators rule lets a compiler fuse an unrounded x*x + y*y + z*z
+// into a fused multiply-add, and different architectures make that choice
+// differently — arm64 fuses it, amd64 currently does not — so the unrounded form
+// can return a different last bit for the same input depending on which machine
+// ran it. An explicit conversion forces the rounding and so forbids the fusion,
+// which is what keeps this fast path returning the same float64 on every
+// architecture. That matters here specifically because callers of this library
+// publish measurements — a length, a distance, a bound — and a published number
+// must not depend on the machine that computed it.
+//
 // Len is NaN only if some component is NaN. It is +Inf if some component is
 // infinite — and also in the one honest overflow: when the true length is itself
 // past [math.MaxFloat64], as for (MaxFloat64, MaxFloat64, 0), whose length is
@@ -85,7 +96,8 @@ func (v Vec) Cross(o Vec) Vec {
 func (v Vec) Len() float64 {
 	x, y, z := math.Abs(v.X), math.Abs(v.Y), math.Abs(v.Z)
 	if ordinaryLenComponent(x) && ordinaryLenComponent(y) && ordinaryLenComponent(z) {
-		return math.Sqrt(x*x + y*y + z*z)
+		xx, yy, zz := float64(x*x), float64(y*y), float64(z*z)
+		return math.Sqrt(xx + yy + zz)
 	}
 	return math.Hypot(math.Hypot(v.X, v.Y), v.Z)
 }
