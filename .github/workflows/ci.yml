@@ -59,6 +59,24 @@ jobs:
       - name: Run tests
         run: go test ${{ matrix.race }} -timeout 10m ./...
 
+  benchmark:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run benchmarks
+        run: go test -run '^$' -bench . -benchmem -benchtime=1x -timeout 10m ./...
+
   # Tier 2: verify the tree is tidy.
   verify:
     needs: lint
