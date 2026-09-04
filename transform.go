@@ -128,6 +128,9 @@ func Rotation(axis Vec, angle units.Value) (Transform, error) {
 	}
 	rad, err := angle.In(units.Radian)
 	if err != nil {
+		if errors.Is(err, units.ErrNotFinite) {
+			return Transform{}, ErrNonFinite
+		}
 		return Transform{}, fmt.Errorf("r3: rotation angle: %w", err)
 	}
 	if !isFinite(rad) {
