@@ -11,7 +11,15 @@ var ErrDegenerateFrame = errors.New("r3: degenerate frame (zero or collinear axe
 
 // orthoTol is how far the stored axes may drift from unit length / mutual
 // orthogonality before [Frame.IsValid] rejects them.
-const orthoTol = 1e-9
+const (
+	orthoTol = 1e-9
+
+	// Products of ordinary components stay normal and finite when each operand
+	// is in this conservative range. Inputs outside it use the exponent-safe
+	// constructor below.
+	frameFastMin = 0x1p-511
+	frameFastMax = 0x1p+511
+)
 
 // Frame is a right-handed orthonormal coordinate frame in world space: an
 // origin plus two in-plane unit axes U and V. The normal N is always U × V and
@@ -136,6 +144,43 @@ func NewFrame(origin, u, v Vec) (Frame, error) {
 	if !u.isFinite() || !v.isFinite() {
 		return Frame{}, ErrDegenerateFrame
 	}
+	if f, ok := newFrameFast(origin, u, v); ok {
+		return f, nil
+	}
+	return newFrameSafe(origin, u, v)
+}
+
+func newFrameFast(origin, u, v Vec) (Frame, bool) {
+	if !frameFastVec(u) || !frameFastVec(v) {
+		return Frame{}, false
+	}
+	n := u.Cross(v)
+	if !frameFastCross(u, v, n) {
+		return Frame{}, false
+	}
+	nDir, ok := frameFastDirection(n)
+	if !ok {
+		return Frame{}, false
+	}
+	un, ok := frameFastDirection(u)
+	if !ok {
+		return Frame{}, false
+	}
+	perp := nDir.Cross(un)
+	if !frameFastCross(nDir, un, perp) {
+		return Frame{}, false
+	}
+	vn, ok := frameFastDirection(perp)
+	if !ok {
+		return Frame{}, false
+	}
+	if !(math.Abs(un.Dot(vn)) <= orthoTol) {
+		return Frame{}, false
+	}
+	return Frame{origin: origin, u: un, v: vn}, true
+}
+
+func newFrameSafe(origin, u, v Vec) (Frame, error) {
 	// The plane normal, from the axes AS GIVEN — no normalization or rescaling has
 	// touched them, so nothing has been rounded or flushed away. The exponent-
 	// tracked kernel makes the zero-or-not call per component at the mantissa
@@ -182,6 +227,58 @@ func NewFrame(origin, u, v Vec) (Frame, error) {
 		return Frame{}, ErrDegenerateFrame
 	}
 	return Frame{origin: origin, u: un, v: vn}, nil
+}
+
+func frameFastVec(v Vec) bool {
+	return frameFastComponent(v.X) && frameFastComponent(v.Y) && frameFastComponent(v.Z)
+}
+
+func frameFastComponent(v float64) bool {
+	if v == 0 {
+		return true
+	}
+	v = math.Abs(v)
+	return v >= frameFastMin && v <= frameFastMax
+}
+
+func frameFastCross(a, b, cross Vec) bool {
+	return frameFastCrossComponent(a.Y, b.Z, a.Z, b.Y, cross.X) &&
+		frameFastCrossComponent(a.Z, b.X, a.X, b.Z, cross.Y) &&
+		frameFastCrossComponent(a.X, b.Y, a.Y, b.X, cross.Z)
+}
+
+func frameFastCrossComponent(a, b, c, d, result float64) bool {
+	if result == 0 {
+		return true
+	}
+	p, q := a*b, c*d
+	return math.Abs(result) >= frameFastMin &&
+		math.Abs(result) > crossNoise*(math.Abs(p)+math.Abs(q))
+}
+
+func frameFastDirection(v Vec) (Vec, bool) {
+	maxAbs := math.Max(math.Abs(v.X), math.Max(math.Abs(v.Y), math.Abs(v.Z)))
+	if !(maxAbs > 0 && maxAbs <= math.MaxFloat64) {
+		return Vec{}, false
+	}
+	minAbs := maxAbs
+	if v.X != 0 {
+		minAbs = math.Min(minAbs, math.Abs(v.X))
+	}
+	if v.Y != 0 {
+		minAbs = math.Min(minAbs, math.Abs(v.Y))
+	}
+	if v.Z != 0 {
+		minAbs = math.Min(minAbs, math.Abs(v.Z))
+	}
+	if minAbs < math.Ldexp(maxAbs, -1073) {
+		return Vec{}, false
+	}
+	l := v.Len()
+	if !(l > 0 && l <= math.MaxFloat64) {
+		return Vec{}, false
+	}
+	return v.Scale(1 / l), true
 }
 
 // Origin returns the world position of the frame's local (0, 0, 0).
@@ -243,10 +340,20 @@ func (f Frame) Equal(o Frame, tol float64) bool {
 // reason (this runs once per point), and it cannot arise at any magnitude a real
 // model contains. A caller working out at MaxFloat64 must check the result.
 func (f Frame) ToWorld(local Vec) Vec {
-	return f.origin.
-		Add(f.u.Scale(local.X)).
-		Add(f.v.Scale(local.Y)).
-		Add(f.N().Scale(local.Z))
+	nx := f.u.Y*f.v.Z - f.u.Z*f.v.Y
+	ny := f.u.Z*f.v.X - f.u.X*f.v.Z
+	nz := f.u.X*f.v.Y - f.u.Y*f.v.X
+
+	x := f.origin.X + f.u.X*local.X
+	x += f.v.X * local.Y
+	x += nx * local.Z
+	y := f.origin.Y + f.u.Y*local.X
+	y += f.v.Y * local.Y
+	y += ny * local.Z
+	z := f.origin.Z + f.u.Z*local.X
+	z += f.v.Z * local.Y
+	z += nz * local.Z
+	return Vec{x, y, z}
 }
 
 // ToWorldUV maps an in-plane 2D point (u, v) — the currency of a planar sketch
@@ -259,7 +366,13 @@ func (f Frame) ToWorld(local Vec) Vec {
 // than an error — a wrong answer, not a refusal, which the caller must check for
 // itself at those magnitudes.
 func (f Frame) ToWorldUV(u, v float64) Vec {
-	return f.origin.Add(f.u.Scale(u)).Add(f.v.Scale(v))
+	x := f.origin.X + f.u.X*u
+	x += f.v.X * v
+	y := f.origin.Y + f.u.Y*u
+	y += f.v.Y * v
+	z := f.origin.Z + f.u.Z*u
+	z += f.v.Z * v
+	return Vec{x, y, z}
 }
 
 // ToLocal maps a world point to local coordinates. The third component is the
@@ -274,6 +387,18 @@ func (f Frame) ToWorldUV(u, v float64) Vec {
 // and so returns a Vec with a non-finite component rather than an error: a wrong
 // answer, not a refusal, and one the caller must check for at those magnitudes.
 func (f Frame) ToLocal(world Vec) Vec {
-	d := world.Sub(f.origin)
-	return Vec{d.Dot(f.u), d.Dot(f.v), d.Dot(f.N())}
+	dx := world.X - f.origin.X
+	dy := world.Y - f.origin.Y
+	dz := world.Z - f.origin.Z
+	nx := f.u.Y*f.v.Z - f.u.Z*f.v.Y
+	ny := f.u.Z*f.v.X - f.u.X*f.v.Z
+	nz := f.u.X*f.v.Y - f.u.Y*f.v.X
+
+	x := dx*f.u.X + dy*f.u.Y
+	x += dz * f.u.Z
+	y := dx*f.v.X + dy*f.v.Y
+	y += dz * f.v.Z
+	z := dx*nx + dy*ny
+	z += dz * nz
+	return Vec{x, y, z}
 }

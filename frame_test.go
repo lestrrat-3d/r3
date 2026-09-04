@@ -369,6 +369,18 @@ func TestNewFrameNormalMatchesPlainCross(t *testing.T) {
 	}
 }
 
+func TestNewFrameOrdinaryRangeMatchesSafeRange(t *testing.T) {
+	t.Parallel()
+
+	u := r3.NewVec(1, 2, 3)
+	v := r3.NewVec(-2, 1, 4)
+	want := mkFrame(t, r3.Vec{}, u, v)
+	for _, scale := range []float64{math.Ldexp(1, -520), math.Ldexp(1, 520)} {
+		got := mkFrame(t, r3.Vec{}, u.Scale(scale), v.Scale(scale))
+		require.True(t, want.Equal(got, 1e-12), "scale=%g: want=%v, got=%v", scale, want, got)
+	}
+}
+
 func TestNewFrameHandedness(t *testing.T) {
 	t.Parallel()
 
@@ -487,6 +499,8 @@ func TestFrameMappingOverflowsAtMaxFloat64(t *testing.T) {
 
 	w := f.ToWorld(r3.NewVec(max, max, max))
 	require.True(t, math.IsInf(w.X, 1), "the documented overflow, not a silent finite lie")
+	uv := f.ToWorldUV(max, max)
+	require.True(t, math.IsInf(uv.X, 1), "ToWorldUV must preserve the fixed summation order")
 
 	l := f.ToLocal(r3.NewVec(max, max, max))
 	require.True(t, math.IsInf(l.X, 1) || math.IsInf(l.Z, -1), "same artefact, through the dot products")
@@ -495,6 +509,22 @@ func TestFrameMappingOverflowsAtMaxFloat64(t *testing.T) {
 	// model contains, the mapping is exact and the round-trip holds.
 	p := r3.NewVec(3, -4, 5)
 	require.True(t, f.ToWorld(f.ToLocal(p)).Equal(p, 1e-12))
+}
+
+func TestFrameMappingsMatchTransform(t *testing.T) {
+	t.Parallel()
+
+	f := mkFrame(t, r3.NewVec(7, -3, 11), r3.NewVec(1, 2, 3), r3.NewVec(-2, 1, 4))
+	tr, err := r3.FromFrame(f)
+	require.NoError(t, err)
+	inverse, err := tr.Inverse()
+	require.NoError(t, err)
+
+	local := r3.NewVec(2.5, -7, 13)
+	world := f.ToWorld(local)
+	require.True(t, tr.Apply(local).Equal(world, 1e-12))
+	require.True(t, f.ToWorldUV(local.X, local.Y).Equal(tr.Apply(r3.NewVec(local.X, local.Y, 0)), 1e-12))
+	require.True(t, f.ToLocal(world).Equal(inverse.Apply(world), 1e-12))
 }
 
 func TestFrameEqual(t *testing.T) {
