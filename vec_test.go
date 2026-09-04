@@ -2,6 +2,7 @@ package r3_test
 
 import (
 	"math"
+	"math/rand"
 	"testing"
 
 	"github.com/lestrrat-3d/r3"
@@ -14,6 +15,93 @@ func vecEqual(t *testing.T, want, got r3.Vec) {
 	// hold them to a tighter tolerance than composed geometry gets.
 	const exact = 1e-12
 	require.Truef(t, want.Equal(got, exact), "want %+v, got %+v", want, got)
+}
+
+func nestedVecLen(v r3.Vec) float64 {
+	return math.Hypot(math.Hypot(v.X, v.Y), v.Z)
+}
+
+func lenClass(x float64) int {
+	switch {
+	case math.IsNaN(x):
+		return 0
+	case math.IsInf(x, 0):
+		return 1
+	case x == 0:
+		return 2
+	default:
+		return 3
+	}
+}
+
+func positiveULPDistance(a, b float64) uint64 {
+	if a > b {
+		return math.Float64bits(a) - math.Float64bits(b)
+	}
+	return math.Float64bits(b) - math.Float64bits(a)
+}
+
+func TestVecLenBoundaryAndClassification(t *testing.T) {
+	t.Parallel()
+
+	positive := []float64{
+		0,
+		math.SmallestNonzeroFloat64,
+		math.Nextafter(0x1p-511, 0),
+		0x1p-511,
+		math.Nextafter(0x1p-511, math.Inf(1)),
+		0x1p-510,
+		1e-100,
+		math.Nextafter(1, 0),
+		1,
+		math.Nextafter(1, math.Inf(1)),
+		1e100,
+		math.Nextafter(0x1p511, 0),
+		0x1p511,
+		math.Nextafter(0x1p511, math.Inf(1)),
+		math.Sqrt(math.MaxFloat64),
+		math.Nextafter(math.Sqrt(math.MaxFloat64), math.Inf(1)),
+		math.MaxFloat64,
+	}
+	values := append([]float64{}, positive...)
+	for _, value := range positive[1:] {
+		values = append(values, -value)
+	}
+	values = append(values, math.Inf(1), math.Inf(-1), math.NaN())
+
+	for _, x := range values {
+		for _, y := range values {
+			for _, z := range values {
+				v := r3.NewVec(x, y, z)
+				want, got := nestedVecLen(v), v.Len()
+				require.Equal(t, lenClass(want), lenClass(got), "classification for %+v", v)
+				if lenClass(want) != 3 {
+					continue
+				}
+				require.LessOrEqual(t, positiveULPDistance(want, got), uint64(4), "length for %+v", v)
+			}
+		}
+	}
+}
+
+func TestVecLenDifferentialOrdinaryRange(t *testing.T) {
+	t.Parallel()
+
+	rng := rand.New(rand.NewSource(1))
+	for i := 0; i < 100_000; i++ {
+		component := func() float64 {
+			exponent := rng.Intn(1021) - 510
+			value := math.Ldexp(0.5+rng.Float64(), exponent)
+			if rng.Intn(2) == 0 {
+				return -value
+			}
+			return value
+		}
+		v := r3.NewVec(component(), component(), component())
+		want, got := nestedVecLen(v), v.Len()
+		require.Equal(t, lenClass(want), lenClass(got))
+		require.LessOrEqual(t, positiveULPDistance(want, got), uint64(4), "length for %+v", v)
+	}
 }
 
 func TestVecEqual(t *testing.T) {

@@ -22,6 +22,14 @@ var ErrNonFinite = errors.New("r3: non-finite value (NaN or Inf)")
 // tolerance.
 const zeroLen = 1e-12
 
+// lenFastComponent bounds each nonzero component so that its square remains a
+// normal float64 and the sum of three such squares remains finite. Components
+// outside this ordinary range take the scale-safe Hypot path below.
+const (
+	lenFastMinComponent = 0x1p-511
+	lenFastMaxComponent = 0x1p511
+)
+
 // isFinite reports whether x is a real number: neither NaN nor infinite.
 //
 // The predicate is phrased positively — |x| <= MaxFloat64, an ACCEPT test —
@@ -63,11 +71,10 @@ func (v Vec) Cross(o Vec) Vec {
 
 // Len returns the Euclidean length of v.
 //
-// It is computed by nested [math.Hypot] rather than the naive sqrt of the sum of
-// squares: squaring a large-but-finite component overflows to +Inf (e.g. 1e200²)
-// and a small one underflows to 0, so the naive form reports an infinite length
-// for a perfectly representable vector. Hypot scales internally and so is exact
-// over the whole finite range.
+// For components in the ordinary range, it uses the faster sqrt of the sum of
+// squares. Squaring a larger or smaller component can overflow or underflow, so
+// those inputs use nested [math.Hypot], which scales internally and is safe over
+// the whole finite range.
 //
 // Len is NaN only if some component is NaN. It is +Inf if some component is
 // infinite — and also in the one honest overflow: when the true length is itself
@@ -75,7 +82,17 @@ func (v Vec) Cross(o Vec) Vec {
 // √2·MaxFloat64. No float64 can name that number, so no implementation could do
 // better. The DIRECTION of such a vector is still recoverable, and
 // [Vec.Normalize] recovers it without going through Len.
-func (v Vec) Len() float64 { return math.Hypot(math.Hypot(v.X, v.Y), v.Z) }
+func (v Vec) Len() float64 {
+	x, y, z := math.Abs(v.X), math.Abs(v.Y), math.Abs(v.Z)
+	if ordinaryLenComponent(x) && ordinaryLenComponent(y) && ordinaryLenComponent(z) {
+		return math.Sqrt(x*x + y*y + z*z)
+	}
+	return math.Hypot(math.Hypot(v.X, v.Y), v.Z)
+}
+
+func ordinaryLenComponent(x float64) bool {
+	return x == 0 || (x >= lenFastMinComponent && x <= lenFastMaxComponent)
+}
 
 // isFinite reports whether every component of v is finite, i.e. whether v names
 // an actual point (or direction) of ℝ³. A vector with a NaN or infinite
