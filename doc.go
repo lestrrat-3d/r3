@@ -2,6 +2,9 @@
 // (ℝ³): a [Vec] vector type, an orthonormal right-handed [Frame] that carries
 // the bidirectional transform between a plane's local (u, v, w) coordinates and
 // world (x, y, z), and a [Transform] that is a rigid motion of the space itself.
+// A proper Transform reads back as a screw motion — its axis line, angle and
+// slide ([Transform.Screw]) — and [Transform.Interpolate] walks the screw
+// joining two poses.
 //
 // # Scope
 //
@@ -33,7 +36,8 @@
 // discouraged. Nothing in the package can produce a non-isometry, because every
 // operation that yields a Transform — the constructors [Translation], [Rotation],
 // [RotationAround], [Reflection], [FromFrame], [FromBasis], and the derivations
-// [Transform.Then] and [Transform.Inverse] — validates what it produces, not
+// [Transform.Then], [Transform.Inverse], [Screw.At] and [Transform.Interpolate]
+// (and [Transform.Screw], which refuses a reflection) — validates what it produces, not
 // merely what it consumes, and returns an error otherwise. [Identity] is the only
 // infallible one, because it takes no input and has nothing to get wrong. It is
 // why a normal transforms exactly like a direction ([Transform.ApplyDir]), with no

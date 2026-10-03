@@ -52,6 +52,29 @@ if err != nil {
 }
 ```
 
+A proper `Transform` is a screw motion: a rotation about a line plus a slide
+along it. `Screw` reads those parameters back, `At` rebuilds a fraction of the
+motion, and `Interpolate` walks from one pose to another along the screw.
+
+```go
+sc, err := place.Screw() // sc.Axis, sc.Point, sc.Angle (in [0, π]), sc.Slide
+if err != nil {
+    return err // r3.ErrImproper: a reflection has no screw motion
+}
+
+step, err := sc.At(0.5)  // half the rotation, half the slide
+if err != nil {
+    return err
+}
+
+mid, err := from.Interpolate(to, 0.5) // the pose halfway from `from` to `to`
+if err != nil {
+    return err
+}
+```
+
+The design is in [`docs/screw-motion-design.md`](docs/screw-motion-design.md).
+
 ## Scope
 
 The package holds what *lives in* 3-space and what *acts on* it — vectors,
@@ -83,7 +106,7 @@ it *is* a shape, it does not.
   **unrepresentable**, not merely discouraged: nothing in the package can build
   one. Every operation that yields a `Transform` but `Identity` is fallible — the
   constructors (`Translation`, `Rotation`, `RotationAround`, `Reflection`,
-  `FromFrame`, `FromBasis`) *and* the derivations (`Then`, `Inverse`) — and each
+  `FromFrame`, `FromBasis`) *and* the derivations (`Then`, `Inverse`, `Screw.At`, `Interpolate`) — and each
   validates what it **produces**, not just what it consumes, rather than admit a
   non-isometry. That is what buys the next two properties.
 - **Nothing non-finite gets in.** A NaN or infinite angle, position, origin or
@@ -138,6 +161,11 @@ it *is* a shape, it does not.
 - **Angles are typed** (`units.Value`), so `Rotation` rejects a length, a bare
   scalar, and the zero value alike — a forgotten angle is an error, not a silent
   0°.
+
+## Design documents
+
+- [`docs/screw-motion-design.md`](docs/screw-motion-design.md) — screw
+  decomposition, `Screw.At` and `Transform.Interpolate`.
 
 ## License
 
