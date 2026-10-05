@@ -145,4 +145,18 @@
 // [Rotation] rejects a zero axis instead of picking one, and rejects an angle
 // that is not an angle — including the zero units.Value, so a forgotten field
 // cannot pass for a deliberate 0°.
+//
+// # Determinism
+//
+// Every result is the same float64 on every architecture. The Go spec lets a
+// compiler fuse an unrounded x*y + z into one fused multiply-add, and
+// architectures choose differently: arm64 fuses, amd64 does only when built for
+// GOAMD64=v3 or later. A fused result can differ in its last bit, and a caller
+// that publishes a measurement must not publish a number that depends on the
+// machine. So every product in the package that feeds a sum or a difference is
+// rounded explicitly with float64(...), which the spec says forbids the fusion:
+// [Vec.Dot], [Vec.Cross], [Vec.Scale], [Vec.Len], [SymmetricTensor.Apply], the
+// per-point mappings above, and the internal kernels they share. A
+// [Vec.Scale] result added to another vector therefore rounds the same way
+// whether or not the compiler inlines it into the caller.
 package r3

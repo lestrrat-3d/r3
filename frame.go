@@ -340,19 +340,19 @@ func (f Frame) Equal(o Frame, tol float64) bool {
 // reason (this runs once per point), and it cannot arise at any magnitude a real
 // model contains. A caller working out at MaxFloat64 must check the result.
 func (f Frame) ToWorld(local Vec) Vec {
-	nx := f.u.Y*f.v.Z - f.u.Z*f.v.Y
-	ny := f.u.Z*f.v.X - f.u.X*f.v.Z
-	nz := f.u.X*f.v.Y - f.u.Y*f.v.X
+	nx := float64(f.u.Y*f.v.Z) - float64(f.u.Z*f.v.Y)
+	ny := float64(f.u.Z*f.v.X) - float64(f.u.X*f.v.Z)
+	nz := float64(f.u.X*f.v.Y) - float64(f.u.Y*f.v.X)
 
-	x := f.origin.X + f.u.X*local.X
-	x += f.v.X * local.Y
-	x += nx * local.Z
-	y := f.origin.Y + f.u.Y*local.X
-	y += f.v.Y * local.Y
-	y += ny * local.Z
-	z := f.origin.Z + f.u.Z*local.X
-	z += f.v.Z * local.Y
-	z += nz * local.Z
+	x := f.origin.X + float64(f.u.X*local.X)
+	x += float64(f.v.X * local.Y)
+	x += float64(nx * local.Z)
+	y := f.origin.Y + float64(f.u.Y*local.X)
+	y += float64(f.v.Y * local.Y)
+	y += float64(ny * local.Z)
+	z := f.origin.Z + float64(f.u.Z*local.X)
+	z += float64(f.v.Z * local.Y)
+	z += float64(nz * local.Z)
 	return Vec{x, y, z}
 }
 
@@ -366,12 +366,12 @@ func (f Frame) ToWorld(local Vec) Vec {
 // than an error — a wrong answer, not a refusal, which the caller must check for
 // itself at those magnitudes.
 func (f Frame) ToWorldUV(u, v float64) Vec {
-	x := f.origin.X + f.u.X*u
-	x += f.v.X * v
-	y := f.origin.Y + f.u.Y*u
-	y += f.v.Y * v
-	z := f.origin.Z + f.u.Z*u
-	z += f.v.Z * v
+	x := f.origin.X + float64(f.u.X*u)
+	x += float64(f.v.X * v)
+	y := f.origin.Y + float64(f.u.Y*u)
+	y += float64(f.v.Y * v)
+	z := f.origin.Z + float64(f.u.Z*u)
+	z += float64(f.v.Z * v)
 	return Vec{x, y, z}
 }
 
@@ -390,15 +390,15 @@ func (f Frame) ToLocal(world Vec) Vec {
 	dx := world.X - f.origin.X
 	dy := world.Y - f.origin.Y
 	dz := world.Z - f.origin.Z
-	nx := f.u.Y*f.v.Z - f.u.Z*f.v.Y
-	ny := f.u.Z*f.v.X - f.u.X*f.v.Z
-	nz := f.u.X*f.v.Y - f.u.Y*f.v.X
+	nx := float64(f.u.Y*f.v.Z) - float64(f.u.Z*f.v.Y)
+	ny := float64(f.u.Z*f.v.X) - float64(f.u.X*f.v.Z)
+	nz := float64(f.u.X*f.v.Y) - float64(f.u.Y*f.v.X)
 
-	x := dx*f.u.X + dy*f.u.Y
-	x += dz * f.u.Z
-	y := dx*f.v.X + dy*f.v.Y
-	y += dz * f.v.Z
-	z := dx*nx + dy*ny
-	z += dz * nz
+	x := float64(dx*f.u.X) + float64(dy*f.u.Y)
+	x += float64(dz * f.u.Z)
+	y := float64(dx*f.v.X) + float64(dy*f.v.Y)
+	y += float64(dz * f.v.Z)
+	z := float64(dx*nx) + float64(dy*ny)
+	z += float64(dz * nz)
 	return Vec{x, y, z}
 }

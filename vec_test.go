@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/lestrrat-3d/r3"
+	"github.com/lestrrat-3d/units"
 	"github.com/stretchr/testify/require"
 )
 
@@ -138,6 +139,61 @@ func TestVecLenRoundingIsArchitectureIndependent(t *testing.T) {
 	const alt = 0x1.5ac9e48fe5a8ep+11  // math.Sqrt(altSum), what a fused build would return instead
 	require.NotEqual(t, want, alt, "test input's divergence does not survive Sqrt")
 	require.Equal(t, want, v.Len())
+}
+
+// fmaProbe is 1 + 2⁻²⁷, held in a variable so that no product of it is
+// constant-folded.
+var fmaProbe = 1 + 0x1p-27
+
+// TestProductRoundingIsArchitectureIndependent pins results that a fused
+// multiply-add would change. Each input makes the exactly rounded products
+// cancel to a value the fused alternative misses, and each case first checks
+// that the alternative really differs, so the test proves something on any
+// machine. A build that dropped the float64(...) rounding in r3 and ran on an
+// architecture that fuses (arm64, or amd64 built for GOAMD64=v3) fails here.
+func TestProductRoundingIsArchitectureIndependent(t *testing.T) {
+	t.Parallel()
+
+	// x² = 1 + 2⁻²⁶ + 2⁻⁵⁴ exactly; rounding drops the 2⁻⁵⁴, and a fused
+	// x·x − round(x²) keeps it. x is a variable, so the compiler cannot fold
+	// the products away at compile time.
+	x := fmaProbe
+	square := float64(x * x)
+	require.NotEqual(t, 0.0, math.FMA(x, -x, square), "x does not distinguish fused from rounded products")
+
+	t.Run("Dot", func(t *testing.T) {
+		t.Parallel()
+		require.Equal(t, 0.0, r3.NewVec(x, x, 0).Dot(r3.NewVec(x, -x, 0)))
+	})
+	t.Run("Cross", func(t *testing.T) {
+		t.Parallel()
+		v := r3.NewVec(x, x, x)
+		require.Equal(t, r3.Vec{}, v.Cross(v))
+	})
+	t.Run("Scale then Add", func(t *testing.T) {
+		t.Parallel()
+		require.Equal(t, r3.Vec{}, r3.NewVec(x, x, x).Scale(x).Add(r3.NewVec(-square, -square, -square)))
+	})
+	t.Run("SymmetricTensor.Apply", func(t *testing.T) {
+		t.Parallel()
+		s, err := r3.NewSymmetricTensor(x, x, x, -x, 0, 0)
+		require.NoError(t, err)
+		got := s.Apply(r3.NewVec(x, x, 0))
+		require.Equal(t, 0.0, got.X)
+		require.Equal(t, 0.0, got.Y)
+	})
+	t.Run("Transform.Apply", func(t *testing.T) {
+		t.Parallel()
+		rot, err := r3.Rotation(r3.NewVec(0, 0, 1), units.Degrees(30))
+		require.NoError(t, err)
+		b := rot.Basis()
+		p := r3.NewVec(0.375, 0.625, 0)
+		want := float64(b.EX.X*p.X) + float64(b.EY.X*p.Y)
+		require.NotEqual(t, want, math.FMA(b.EY.X, p.Y, float64(b.EX.X*p.X)))
+		require.NotEqual(t, want, math.FMA(b.EX.X, p.X, float64(b.EY.X*p.Y)))
+		require.Equal(t, want, rot.Apply(p).X)
+		require.Equal(t, want, rot.ApplyDir(p).X)
+	})
 }
 
 func TestVecEqual(t *testing.T) {

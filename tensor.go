@@ -43,9 +43,9 @@ func (s SymmetricTensor) Components() (xx, yy, zz, xy, xz, yz float64) {
 // resulting vector for non-finite components.
 func (s SymmetricTensor) Apply(v Vec) Vec {
 	return Vec{
-		X: s.xx*v.X + s.xy*v.Y + s.xz*v.Z,
-		Y: s.xy*v.X + s.yy*v.Y + s.yz*v.Z,
-		Z: s.xz*v.X + s.yz*v.Y + s.zz*v.Z,
+		X: float64(s.xx*v.X) + float64(s.xy*v.Y) + float64(s.xz*v.Z),
+		Y: float64(s.xy*v.X) + float64(s.yy*v.Y) + float64(s.yz*v.Z),
+		Z: float64(s.xz*v.X) + float64(s.yz*v.Y) + float64(s.zz*v.Z),
 	}
 }
 

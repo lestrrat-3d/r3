@@ -374,9 +374,9 @@ func orthonormalize(b Basis) (Basis, bool) {
 // the hot path is not bought off.
 func (t Transform) Apply(p Vec) Vec {
 	return Vec{
-		X: t.ex.X*p.X + t.ey.X*p.Y + t.ez.X*p.Z + t.t.X,
-		Y: t.ex.Y*p.X + t.ey.Y*p.Y + t.ez.Y*p.Z + t.t.Y,
-		Z: t.ex.Z*p.X + t.ey.Z*p.Y + t.ez.Z*p.Z + t.t.Z,
+		X: float64(t.ex.X*p.X) + float64(t.ey.X*p.Y) + float64(t.ez.X*p.Z) + t.t.X,
+		Y: float64(t.ex.Y*p.X) + float64(t.ey.Y*p.Y) + float64(t.ez.Y*p.Z) + t.t.Y,
+		Z: float64(t.ex.Z*p.X) + float64(t.ey.Z*p.Y) + float64(t.ez.Z*p.Z) + t.t.Z,
 	}
 }
 
@@ -422,9 +422,9 @@ func (t Transform) Apply(p Vec) Vec {
 //     must check the result itself.
 func (t Transform) ApplyDir(d Vec) Vec {
 	return Vec{
-		X: t.ex.X*d.X + t.ey.X*d.Y + t.ez.X*d.Z,
-		Y: t.ex.Y*d.X + t.ey.Y*d.Y + t.ez.Y*d.Z,
-		Z: t.ex.Z*d.X + t.ey.Z*d.Y + t.ez.Z*d.Z,
+		X: float64(t.ex.X*d.X) + float64(t.ey.X*d.Y) + float64(t.ez.X*d.Z),
+		Y: float64(t.ex.Y*d.X) + float64(t.ey.Y*d.Y) + float64(t.ez.Y*d.Z),
+		Z: float64(t.ex.Z*d.X) + float64(t.ey.Z*d.Y) + float64(t.ez.Z*d.Z),
 	}
 }
 

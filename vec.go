@@ -55,17 +55,17 @@ func (v Vec) Add(o Vec) Vec { return Vec{v.X + o.X, v.Y + o.Y, v.Z + o.Z} }
 func (v Vec) Sub(o Vec) Vec { return Vec{v.X - o.X, v.Y - o.Y, v.Z - o.Z} }
 
 // Scale returns v scaled by s.
-func (v Vec) Scale(s float64) Vec { return Vec{v.X * s, v.Y * s, v.Z * s} }
+func (v Vec) Scale(s float64) Vec { return Vec{float64(v.X * s), float64(v.Y * s), float64(v.Z * s)} }
 
 // Dot returns the dot product v · o.
-func (v Vec) Dot(o Vec) float64 { return v.X*o.X + v.Y*o.Y + v.Z*o.Z }
+func (v Vec) Dot(o Vec) float64 { return float64(v.X*o.X) + float64(v.Y*o.Y) + float64(v.Z*o.Z) }
 
 // Cross returns the cross product v × o.
 func (v Vec) Cross(o Vec) Vec {
 	return Vec{
-		v.Y*o.Z - v.Z*o.Y,
-		v.Z*o.X - v.X*o.Z,
-		v.X*o.Y - v.Y*o.X,
+		float64(v.Y*o.Z) - float64(v.Z*o.Y),
+		float64(v.Z*o.X) - float64(v.X*o.Z),
+		float64(v.X*o.Y) - float64(v.Y*o.X),
 	}
 }
 
@@ -136,14 +136,14 @@ func (v Vec) isFinite() bool { return isFinite(v.X) && isFinite(v.Y) && isFinite
 //
 // A NaN or infinite component of v propagates into the result, as it should.
 func (v Vec) dotUnit(u Vec) float64 {
-	px, py, pz := v.X*u.X, v.Y*u.Y, v.Z*u.Z
+	px, py, pz := float64(v.X*u.X), float64(v.Y*u.Y), float64(v.Z*u.Z)
 	// Phrased positively (an ACCEPT test) so that a NaN — false against every
 	// bound whichever way the test is written — takes the same path as an
 	// overflow rather than sailing through.
 	if s := px + py + pz; isFinite(s) {
 		return s
 	}
-	return ((px * 0.25) + (py * 0.25) + (pz * 0.25)) * 4
+	return (float64(px*0.25) + float64(py*0.25) + float64(pz*0.25)) * 4
 }
 
 // crossNoise is the relative width of the band around zero within which the
@@ -175,9 +175,9 @@ const crossNoise = 0x1p-52
 // handle rather than a silent zero. A NaN fails the positively-phrased test and is
 // likewise passed on.
 func diffProd(a, b, c, d float64) float64 {
-	p, q := a*b, c*d
+	p, q := float64(a*b), float64(c*d)
 	r := p - q
-	if !(math.Abs(r) > crossNoise*math.Abs(p)+crossNoise*math.Abs(q)) {
+	if !(math.Abs(r) > float64(crossNoise*math.Abs(p))+float64(crossNoise*math.Abs(q))) {
 		return 0
 	}
 	return r
@@ -266,8 +266,8 @@ func diffProdExp(a, b, c, d float64) expComp {
 	mb, eb := math.Frexp(b)
 	mc, ec := math.Frexp(c)
 	md, ed := math.Frexp(d)
-	p, ep := ma*mb, ea+eb
-	q, eq := mc*md, ec+ed
+	p, ep := float64(ma*mb), ea+eb
+	q, eq := float64(mc*md), ec+ed
 	if p == 0 && q == 0 {
 		return expComp{}
 	}
@@ -284,7 +284,7 @@ func diffProdExp(a, b, c, d float64) expComp {
 	// The rounding-band test, phrased positively as everywhere in the package: a
 	// NaN cannot arise here (the inputs are finite mantissas), but the convention
 	// is kept so the shape of every guard reads the same.
-	if !(math.Abs(r) > crossNoise*math.Abs(pa)+crossNoise*math.Abs(qa)) {
+	if !(math.Abs(r) > float64(crossNoise*math.Abs(pa))+float64(crossNoise*math.Abs(qa))) {
 		return expComp{}
 	}
 	return expComp{m: r, e: e}
