@@ -37,7 +37,22 @@ const (
 // compares false against every bound whichever way the test is written, so it
 // must be made to fail an accept test; a reject test it would sail straight
 // through. The whole package leans on this convention.
-func isFinite(x float64) bool { return math.Abs(x) <= math.MaxFloat64 }
+//
+// It is written as two comparisons rather than math.Abs(x) <= MaxFloat64 because
+// math.Abs converts through unsafe.Pointer, and a -race build (which enables
+// checkptr) pays a runtime call for every such conversion. The two forms agree on
+// every input, NaN included.
+func isFinite(x float64) bool { return x <= math.MaxFloat64 && x >= -math.MaxFloat64 }
+
+// absCmp returns |x| using a comparison instead of math.Abs, for the same reason
+// [isFinite] avoids it. It differs from math.Abs only in the sign bit of a zero or
+// NaN, which the callers' squaring and comparisons erase.
+func absCmp(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
 
 // Vec is a vector (or point) in 3-space: pure transient coordinate math. It
 // carries no document state.
@@ -94,7 +109,7 @@ func (v Vec) Cross(o Vec) Vec {
 // better. The DIRECTION of such a vector is still recoverable, and
 // [Vec.Normalize] recovers it without going through Len.
 func (v Vec) Len() float64 {
-	x, y, z := math.Abs(v.X), math.Abs(v.Y), math.Abs(v.Z)
+	x, y, z := absCmp(v.X), absCmp(v.Y), absCmp(v.Z)
 	if ordinaryLenComponent(x) && ordinaryLenComponent(y) && ordinaryLenComponent(z) {
 		xx, yy, zz := float64(x*x), float64(y*y), float64(z*z)
 		return math.Sqrt(xx + yy + zz)
