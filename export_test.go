@@ -29,3 +29,7 @@ func TransformWithTranslation(t Vec) Transform {
 func TransformWithBasis(b Basis, t Vec) Transform {
 	return Transform{ex: b.EX, ey: b.EY, ez: b.EZ, t: t}
 }
+
+// IsFinite exposes the unexported isFinite so the differential test can compare
+// it with its math.Abs form.
+func IsFinite(x float64) bool { return isFinite(x) }
